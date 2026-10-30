@@ -54,7 +54,7 @@ Widget statusChip(String s) {
   );
 }
 
-// Original image se watermark wali chhoti preview banata hai
+// Creates a small watermarked preview from the original image
 Future<Uint8List> makePreview(Uint8List bytes) async {
   final codec = await ui.instantiateImageCodec(bytes, targetWidth: 720);
   final frame = await codec.getNextFrame();
@@ -97,7 +97,7 @@ Future<void> openOriginal(BuildContext context, String path) async {
   try {
     final url = await db.storage.from('originals').createSignedUrl(path, 3600);
     final ok = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-    if (!ok && context.mounted) toast(context, 'Link khul nahi paya');
+    if (!ok && context.mounted) toast(context, 'Could not open the link');
   } catch (e) {
     if (context.mounted) toast(context, 'Download error: $e');
   }
@@ -158,7 +158,7 @@ class _LoginPageState extends State<LoginPage> {
     final email = _email.text.trim();
     final pass = _pass.text;
     if (email.isEmpty || pass.length < 6) {
-      toast(context, 'Email daalo aur password kam se kam 6 akshar ka rakho');
+      toast(context, 'Enter your email and a password of at least 6 characters');
       return;
     }
     setState(() => _busy = true);
@@ -166,7 +166,7 @@ class _LoginPageState extends State<LoginPage> {
       if (_signup) {
         final res = await db.auth.signUp(email: email, password: pass);
         if (res.session == null && mounted) {
-          toast(context, 'Email par code bheja gaya hai');
+          toast(context, 'A code has been sent to your email');
           await Navigator.push(
             context,
             MaterialPageRoute(builder: (_) => OtpPage(email: email, recovery: false)),
@@ -187,14 +187,14 @@ class _LoginPageState extends State<LoginPage> {
   Future<void> _forgot() async {
     final email = _email.text.trim();
     if (email.isEmpty) {
-      toast(context, 'Pehle upar email daalo');
+      toast(context, 'Enter your email above first');
       return;
     }
     setState(() => _busy = true);
     try {
       await db.auth.resetPasswordForEmail(email);
       if (!mounted) return;
-      toast(context, 'Email par code bheja gaya hai');
+      toast(context, 'A code has been sent to your email');
       await Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => OtpPage(email: email, recovery: true)),
@@ -237,17 +237,17 @@ class _LoginPageState extends State<LoginPage> {
                 width: double.infinity,
                 child: FilledButton(
                   onPressed: _busy ? null : _submit,
-                  child: Text(_busy ? 'Ruko...' : (_signup ? 'Account banao' : 'Login')),
+                  child: Text(_busy ? 'Please wait...' : (_signup ? 'Create account' : 'Login')),
                 ),
               ),
               TextButton(
                 onPressed: () => setState(() => _signup = !_signup),
-                child: Text(_signup ? 'Account hai? Login karo' : 'Naya account banao'),
+                child: Text(_signup ? 'Already have an account? Login' : 'Create a new account'),
               ),
               if (!_signup)
                 TextButton(
                   onPressed: _busy ? null : _forgot,
-                  child: const Text('Password bhool gaye?'),
+                  child: const Text('Forgot password?'),
                 ),
             ],
           ),
@@ -274,11 +274,11 @@ class _OtpPageState extends State<OtpPage> {
   Future<void> _verify() async {
     final code = _code.text.trim();
     if (code.length < 6) {
-      toast(context, 'Email me aaya code daalo');
+      toast(context, 'Enter the code from your email');
       return;
     }
     if (widget.recovery && _newPass.text.length < 6) {
-      toast(context, 'Naya password kam se kam 6 akshar ka rakho');
+      toast(context, 'New password must be at least 6 characters');
       return;
     }
     setState(() => _busy = true);
@@ -304,29 +304,29 @@ class _OtpPageState extends State<OtpPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.recovery ? 'Password reset' : 'Email verify')),
+      appBar: AppBar(title: Text(widget.recovery ? 'Reset password' : 'Verify email')),
       body: ListView(
         padding: const EdgeInsets.all(24),
         children: [
-          Text('Code is email par bheja gaya hai:\n${widget.email}'),
+          Text('A code was sent to this email:\n${widget.email}'),
           const SizedBox(height: 16),
           TextField(
             controller: _code,
             keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'Email wala code', border: OutlineInputBorder()),
+            decoration: const InputDecoration(labelText: 'Code from email', border: OutlineInputBorder()),
           ),
           if (widget.recovery) ...[
             const SizedBox(height: 12),
             TextField(
               controller: _newPass,
               obscureText: true,
-              decoration: const InputDecoration(labelText: 'Naya password', border: OutlineInputBorder()),
+              decoration: const InputDecoration(labelText: 'New password', border: OutlineInputBorder()),
             ),
           ],
           const SizedBox(height: 20),
           FilledButton(
             onPressed: _busy ? null : _verify,
-            child: Text(_busy ? 'Ruko...' : (widget.recovery ? 'Password badlo' : 'Verify karo')),
+            child: Text(_busy ? 'Please wait...' : (widget.recovery ? 'Change password' : 'Verify')),
           ),
         ],
       ),
@@ -450,6 +450,9 @@ class StorePage extends StatefulWidget {
 
 class _StorePageState extends State<StorePage> {
   late Future<Rows> _f = _load();
+  final _search = TextEditingController();
+  String _q = '';
+  String _cat = 'All';
 
   Future<Rows> _load() async {
     final r = await db.from('templates').select().order('created_at', ascending: false);
@@ -460,6 +463,15 @@ class _StorePageState extends State<StorePage> {
     setState(() {
       _f = _load();
     });
+  }
+
+  Rows _filter(Rows all) {
+    final q = _q.trim().toLowerCase();
+    return all.where((t) {
+      final okCat = _cat == 'All' || (t['category'] ?? 'General') == _cat;
+      final okQ = q.isEmpty || (t['title'] as String).toLowerCase().contains(q);
+      return okCat && okQ;
+    }).toList();
   }
 
   @override
@@ -476,83 +488,141 @@ class _StorePageState extends State<StorePage> {
                 if (ok == true) _reload();
               },
               icon: const Icon(Icons.add),
-              label: const Text('Template add'),
+              label: const Text('Add template'),
             )
           : null,
-      body: RefreshIndicator(
-        onRefresh: () async {
-          _reload();
-          await _f;
-        },
-        child: FutureBuilder<Rows>(
-          future: _f,
-          builder: (context, s) {
-            if (s.hasError) {
-              return ListView(children: [
-                Padding(padding: const EdgeInsets.all(24), child: Text('Load nahi hua: ${s.error}')),
-              ]);
-            }
-            if (!s.hasData) return const Center(child: CircularProgressIndicator());
-            final items = s.data!;
-            if (items.isEmpty) {
-              return ListView(children: const [
-                Padding(
-                  padding: EdgeInsets.all(40),
-                  child: Center(child: Text('Abhi koi template nahi hai')),
+      body: FutureBuilder<Rows>(
+        future: _f,
+        builder: (context, s) {
+          if (s.hasError) {
+            return ListView(children: [
+              Padding(padding: const EdgeInsets.all(24), child: Text('Could not load: ${s.error}')),
+            ]);
+          }
+          if (!s.hasData) return const Center(child: CircularProgressIndicator());
+          final all = s.data!;
+          final cats = <String>{
+            'All',
+            ...all.map((t) => (t['category'] ?? 'General') as String),
+          }.toList();
+          final items = _filter(all);
+
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                child: TextField(
+                  controller: _search,
+                  onChanged: (v) => setState(() => _q = v),
+                  decoration: InputDecoration(
+                    hintText: 'Search templates',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _q.isEmpty
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.close),
+                            onPressed: () {
+                              _search.clear();
+                              setState(() => _q = '');
+                            },
+                          ),
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                  ),
                 ),
-              ]);
-            }
-            return GridView.builder(
-              padding: const EdgeInsets.all(12),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 2,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
-                childAspectRatio: 0.72,
               ),
-              itemCount: items.length,
-              itemBuilder: (c, i) {
-                final t = items[i];
-                return Card(
-                  clipBehavior: Clip.antiAlias,
-                  child: InkWell(
-                    onTap: () async {
-                      await Navigator.push(
-                        c,
-                        MaterialPageRoute(builder: (_) => DetailPage(t: t, isAdmin: widget.isAdmin)),
-                      );
-                      _reload();
-                    },
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Expanded(child: PreviewImage(path: t['preview_path'] as String)),
-                        Padding(
-                          padding: const EdgeInsets.all(8),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                t['title'] as String,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontWeight: FontWeight.w600),
-                              ),
-                              Text(
-                                money(t['price'] as num),
-                                style: TextStyle(color: Theme.of(context).colorScheme.primary),
-                              ),
-                            ],
+              SizedBox(
+                height: 48,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  children: cats
+                      .map(
+                        (c) => Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ChoiceChip(
+                            label: Text(c),
+                            selected: _cat == c,
+                            onSelected: (_) => setState(() => _cat = c),
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            );
-          },
-        ),
+                      )
+                      .toList(),
+                ),
+              ),
+              Expanded(
+                child: RefreshIndicator(
+                  onRefresh: () async {
+                    _reload();
+                    await _f;
+                  },
+                  child: items.isEmpty
+                      ? ListView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          children: const [
+                            Padding(
+                              padding: EdgeInsets.all(40),
+                              child: Center(child: Text('No templates found')),
+                            ),
+                          ],
+                        )
+                      : GridView.builder(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.all(12),
+                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2,
+                            mainAxisSpacing: 12,
+                            crossAxisSpacing: 12,
+                            childAspectRatio: 0.72,
+                          ),
+                          itemCount: items.length,
+                          itemBuilder: (c, i) {
+                            final t = items[i];
+                            return Card(
+                              clipBehavior: Clip.antiAlias,
+                              child: InkWell(
+                                onTap: () async {
+                                  await Navigator.push(
+                                    c,
+                                    MaterialPageRoute(
+                                      builder: (_) => DetailPage(t: t, isAdmin: widget.isAdmin),
+                                    ),
+                                  );
+                                  _reload();
+                                },
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(child: PreviewImage(path: t['preview_path'] as String)),
+                                    Padding(
+                                      padding: const EdgeInsets.all(8),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            t['title'] as String,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(fontWeight: FontWeight.w600),
+                                          ),
+                                          Text(
+                                            money(t['price'] as num),
+                                            style: TextStyle(color: Theme.of(context).colorScheme.primary),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -596,8 +666,8 @@ class _DetailPageState extends State<DetailPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('Delete karein?'),
-        content: const Text('Ye template hamesha ke liye hat jayega.'),
+        title: const Text('Delete this template?'),
+        content: const Text('This template will be removed permanently.'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Delete')),
@@ -630,7 +700,7 @@ class _DetailPageState extends State<DetailPage> {
           child: FilledButton.icon(
             onPressed: () => openOriginal(context, t['file_path'] as String),
             icon: const Icon(Icons.download),
-            label: const Text('Original download'),
+            label: const Text('Download original'),
           ),
         ),
         const SizedBox(height: 8),
@@ -639,7 +709,7 @@ class _DetailPageState extends State<DetailPage> {
           child: OutlinedButton.icon(
             onPressed: _delete,
             icon: const Icon(Icons.delete_outline),
-            label: const Text('Template delete'),
+            label: const Text('Delete template'),
           ),
         ),
       ]);
@@ -649,14 +719,14 @@ class _DetailPageState extends State<DetailPage> {
         child: FilledButton.icon(
           onPressed: () => openOriginal(context, t['file_path'] as String),
           icon: const Icon(Icons.download),
-          label: const Text('Download karo'),
+          label: const Text('Download'),
         ),
       );
     } else if (_status == 'pending') {
       action = const Card(
         child: Padding(
           padding: EdgeInsets.all(14),
-          child: Text('Aapka payment verify ho raha hai. Master approve karega to yahan download khul jayega.'),
+          child: Text('Your payment is being verified. Once the master approves it, the download will unlock here.'),
         ),
       );
     } else {
@@ -664,7 +734,7 @@ class _DetailPageState extends State<DetailPage> {
         if (_status == 'rejected')
           const Padding(
             padding: EdgeInsets.only(bottom: 8),
-            child: Text('Pichla payment reject hua tha. Dobara try kar sakte ho.'),
+            child: Text('Your last payment was rejected. You can try again.'),
           ),
         SizedBox(
           width: double.infinity,
@@ -679,7 +749,7 @@ class _DetailPageState extends State<DetailPage> {
                 _loadStatus();
               }
             },
-            child: Text('Kharido  ${money(price)}'),
+            child: Text('Buy  ${money(price)}'),
           ),
         ),
       ]);
@@ -700,12 +770,18 @@ class _DetailPageState extends State<DetailPage> {
           const SizedBox(height: 16),
           Text(t['title'] as String, style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 4),
-          Text(
-            money(price),
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(color: Theme.of(context).colorScheme.primary),
+          Row(
+            children: [
+              Text(
+                money(price),
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(color: Theme.of(context).colorScheme.primary),
+              ),
+              const SizedBox(width: 12),
+              Chip(label: Text((t['category'] ?? 'General') as String)),
+            ],
           ),
           const SizedBox(height: 8),
           Text((t['description'] ?? '') as String),
@@ -740,16 +816,16 @@ class _BuyPageState extends State<BuyPage> {
     final uri = Uri.parse(_upiLink);
     try {
       final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!ok && mounted) toast(context, 'UPI app nahi mila. UPI ID par manually pay karo.');
+      if (!ok && mounted) toast(context, 'UPI app not found. Please pay manually to the UPI ID.');
     } catch (_) {
-      if (mounted) toast(context, 'UPI app nahi mila. UPI ID par manually pay karo.');
+      if (mounted) toast(context, 'UPI app not found. Please pay manually to the UPI ID.');
     }
   }
 
   Future<void> _submit() async {
     final utr = _utr.text.trim();
     if (utr.length < 6) {
-      toast(context, 'Payment ka UTR / Transaction ID daalo');
+      toast(context, 'Enter the payment UTR / Transaction ID');
       return;
     }
     setState(() => _busy = true);
@@ -762,8 +838,16 @@ class _BuyPageState extends State<BuyPage> {
         'status': 'pending',
       });
       if (mounted) {
-        toast(context, 'Request bhej di. Master approve karega to download khulega.');
+        toast(context, 'Request sent. Download unlocks after the master approves.');
         Navigator.pop(context, true);
+      }
+    } on PostgrestException catch (e) {
+      if (mounted) {
+        toast(
+          context,
+          e.code == '23505' ? 'This transaction ID has already been used' : 'Error: ${e.message}',
+        );
+        setState(() => _busy = false);
       }
     } catch (e) {
       if (mounted) {
@@ -785,7 +869,7 @@ class _BuyPageState extends State<BuyPage> {
           const SizedBox(height: 4),
           Text('Amount: ${money(price)}', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 20),
-          const Text('Step 1: UPI se pay karo'),
+          const Text('Step 1: Pay with UPI'),
           const SizedBox(height: 8),
           Card(
             child: ListTile(
@@ -795,7 +879,7 @@ class _BuyPageState extends State<BuyPage> {
                 icon: const Icon(Icons.copy),
                 onPressed: () {
                   Clipboard.setData(ClipboardData(text: upiId));
-                  toast(context, 'UPI ID copy ho gayi');
+                  toast(context, 'UPI ID copied');
                 },
               ),
             ),
@@ -814,7 +898,7 @@ class _BuyPageState extends State<BuyPage> {
           ),
           const SizedBox(height: 4),
           const Text(
-            'Ya ye QR kisi bhi UPI app se scan karke pay karo',
+            'Or scan this QR with any UPI app',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 12),
           ),
@@ -824,11 +908,11 @@ class _BuyPageState extends State<BuyPage> {
             child: FilledButton.tonalIcon(
               onPressed: _pay,
               icon: const Icon(Icons.payments_outlined),
-              label: const Text('UPI app kholo'),
+              label: const Text('Open UPI app'),
             ),
           ),
           const SizedBox(height: 24),
-          const Text('Step 2: Payment ka UTR / Transaction ID daalo'),
+          const Text('Step 2: Enter your payment UTR / Transaction ID'),
           const SizedBox(height: 8),
           TextField(
             controller: _utr,
@@ -839,7 +923,7 @@ class _BuyPageState extends State<BuyPage> {
             width: double.infinity,
             child: FilledButton(
               onPressed: _busy ? null : _submit,
-              child: Text(_busy ? 'Ruko...' : 'Payment ho gaya, request bhejo'),
+              child: Text(_busy ? 'Please wait...' : 'I have paid, send request'),
             ),
           ),
         ],
@@ -859,9 +943,29 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
   final _title = TextEditingController();
   final _price = TextEditingController();
   final _desc = TextEditingController();
+  final _cat = TextEditingController(text: 'General');
+  List<String> _existing = [];
   XFile? _file;
   Uint8List? _bytes;
   bool _busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCats();
+  }
+
+  Future<void> _loadCats() async {
+    try {
+      final r = await db.from('templates').select('category');
+      final s = <String>{};
+      for (final m in asRows(r)) {
+        final c = m['category'];
+        if (c is String && c.isNotEmpty) s.add(c);
+      }
+      if (mounted) setState(() => _existing = s.toList());
+    } catch (_) {}
+  }
 
   Future<void> _pick() async {
     final x = await ImagePicker().pickImage(source: ImageSource.gallery);
@@ -877,7 +981,7 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
     final title = _title.text.trim();
     final price = num.tryParse(_price.text.trim());
     if (_bytes == null || title.isEmpty || price == null || price < 0) {
-      toast(context, 'Image, title aur sahi price daalo');
+      toast(context, 'Please choose an image, title and a valid price');
       return;
     }
     setState(() => _busy = true);
@@ -900,15 +1004,17 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
       await db.storage
           .from('previews')
           .uploadBinary(previewPath, preview, fileOptions: const FileOptions(contentType: 'image/png'));
+      final cat = _cat.text.trim().isEmpty ? 'General' : _cat.text.trim();
       await db.from('templates').insert({
         'title': title,
         'description': _desc.text.trim(),
         'price': price,
+        'category': cat,
         'file_path': filePath,
         'preview_path': previewPath,
       });
       if (mounted) {
-        toast(context, 'Template add ho gaya');
+        toast(context, 'Template added');
         Navigator.pop(context, true);
       }
     } catch (e) {
@@ -922,7 +1028,7 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Naya template')),
+      appBar: AppBar(title: const Text('New template')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -935,11 +1041,11 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
           OutlinedButton.icon(
             onPressed: _pick,
             icon: const Icon(Icons.image_outlined),
-            label: Text(_bytes == null ? 'Edit ki hui image chuno' : 'Image badlo'),
+            label: Text(_bytes == null ? 'Choose edited image' : 'Change image'),
           ),
           const SizedBox(height: 4),
           const Text(
-            'Preview par watermark app khud laga dega. Asli image sirf payment approve hone ke baad milegi.',
+            'A watermark is added to the preview automatically. The original is shared only after payment approval.',
             style: TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 16),
@@ -955,6 +1061,20 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
           ),
           const SizedBox(height: 12),
           TextField(
+            controller: _cat,
+            decoration: const InputDecoration(labelText: 'Category', border: OutlineInputBorder()),
+          ),
+          if (_existing.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: _existing
+                  .map((c) => ActionChip(label: Text(c), onPressed: () => setState(() => _cat.text = c)))
+                  .toList(),
+            ),
+          ],
+          const SizedBox(height: 12),
+          TextField(
             controller: _desc,
             maxLines: 3,
             decoration: const InputDecoration(labelText: 'Description', border: OutlineInputBorder()),
@@ -962,7 +1082,7 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
           const SizedBox(height: 20),
           FilledButton(
             onPressed: _busy ? null : _save,
-            child: Text(_busy ? 'Upload ho raha hai...' : 'Save karo'),
+            child: Text(_busy ? 'Uploading...' : 'Save'),
           ),
         ],
       ),
@@ -1009,7 +1129,7 @@ class _OrdersPageState extends State<OrdersPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.isAdmin ? 'Saare Orders' : 'My Purchases')),
+      appBar: AppBar(title: Text(widget.isAdmin ? 'All Orders' : 'My Purchases')),
       body: RefreshIndicator(
         onRefresh: () async {
           _reload();
@@ -1020,14 +1140,14 @@ class _OrdersPageState extends State<OrdersPage> {
           builder: (context, s) {
             if (s.hasError) {
               return ListView(children: [
-                Padding(padding: const EdgeInsets.all(24), child: Text('Load nahi hua: ${s.error}')),
+                Padding(padding: const EdgeInsets.all(24), child: Text('Could not load: ${s.error}')),
               ]);
             }
             if (!s.hasData) return const Center(child: CircularProgressIndicator());
             final items = s.data!;
             if (items.isEmpty) {
               return ListView(children: const [
-                Padding(padding: EdgeInsets.all(40), child: Center(child: Text('Abhi koi order nahi hai'))),
+                Padding(padding: EdgeInsets.all(40), child: Center(child: Text('No orders yet'))),
               ]);
             }
             return ListView.builder(
@@ -1125,7 +1245,7 @@ class _SupportPageState extends State<SupportPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('Nayi support request'),
+        title: const Text('New support request'),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1135,14 +1255,14 @@ class _SupportPageState extends State<SupportPage> {
               TextField(
                 controller: msg,
                 maxLines: 4,
-                decoration: const InputDecoration(labelText: 'Aapki problem'),
+                decoration: const InputDecoration(labelText: 'Describe your problem'),
               ),
             ],
           ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Bhejo')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Send')),
         ],
       ),
     );
@@ -1150,7 +1270,7 @@ class _SupportPageState extends State<SupportPage> {
     final s = subj.text.trim();
     final m = msg.text.trim();
     if (s.isEmpty || m.isEmpty) {
-      if (mounted) toast(context, 'Subject aur message dono bharo');
+      if (mounted) toast(context, 'Please fill in both subject and message');
       return;
     }
     try {
@@ -1180,7 +1300,7 @@ class _SupportPageState extends State<SupportPage> {
           : FloatingActionButton.extended(
               onPressed: _newTicket,
               icon: const Icon(Icons.add),
-              label: const Text('Nayi request'),
+              label: const Text('New request'),
             ),
       body: RefreshIndicator(
         onRefresh: () async {
@@ -1192,14 +1312,14 @@ class _SupportPageState extends State<SupportPage> {
           builder: (context, s) {
             if (s.hasError) {
               return ListView(children: [
-                Padding(padding: const EdgeInsets.all(24), child: Text('Load nahi hua: ${s.error}')),
+                Padding(padding: const EdgeInsets.all(24), child: Text('Could not load: ${s.error}')),
               ]);
             }
             if (!s.hasData) return const Center(child: CircularProgressIndicator());
             final items = s.data!;
             if (items.isEmpty) {
               return ListView(children: const [
-                Padding(padding: EdgeInsets.all(40), child: Center(child: Text('Koi support request nahi hai'))),
+                Padding(padding: EdgeInsets.all(40), child: Center(child: Text('No support requests'))),
               ]);
             }
             return ListView.separated(
@@ -1359,7 +1479,7 @@ class _TicketPageState extends State<TicketPage> {
                       minLines: 1,
                       maxLines: 4,
                       decoration: const InputDecoration(
-                        hintText: 'Message likho...',
+                        hintText: 'Type a message...',
                         border: OutlineInputBorder(),
                         isDense: true,
                       ),
