@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -728,13 +729,15 @@ class _BuyPageState extends State<BuyPage> {
   final _utr = TextEditingController();
   bool _busy = false;
 
-  Future<void> _pay() async {
+  String get _upiLink {
     final price = widget.t['price'] as num;
-    final uri = Uri.parse(
-      'upi://pay?pa=$upiId&pn=${Uri.encodeComponent(payeeName)}'
-      '&am=${price.toStringAsFixed(2)}&cu=INR'
-      '&tn=${Uri.encodeComponent(widget.t['title'] as String)}',
-    );
+    return 'upi://pay?pa=$upiId&pn=${Uri.encodeComponent(payeeName)}'
+        '&am=${price.toStringAsFixed(2)}&cu=INR'
+        '&tn=${Uri.encodeComponent(widget.t['title'] as String)}';
+  }
+
+  Future<void> _pay() async {
+    final uri = Uri.parse(_upiLink);
     try {
       final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!ok && mounted) toast(context, 'UPI app nahi mila. UPI ID par manually pay karo.');
@@ -797,6 +800,25 @@ class _BuyPageState extends State<BuyPage> {
               ),
             ),
           ),
+          const SizedBox(height: 8),
+          Center(
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              color: Colors.white,
+              child: QrImageView(
+                data: _upiLink,
+                size: 220,
+                backgroundColor: Colors.white,
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Ya ye QR kisi bhi UPI app se scan karke pay karo',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 8),
           SizedBox(
             width: double.infinity,
             child: FilledButton.tonalIcon(
