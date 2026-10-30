@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' show Random;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -16,6 +17,48 @@ SupabaseClient get db => Supabase.instance.client;
 typedef Rows = List<Map<String, dynamic>>;
 
 Rows asRows(dynamic r) => List<Map<String, dynamic>>.from(r as List);
+
+// ---------------------------------------------------------------- CART
+
+class CartModel extends ChangeNotifier {
+  final List<Map<String, dynamic>> items = [];
+
+  bool has(dynamic id) => items.any((t) => t['id'] == id);
+
+  num get total => items.fold<num>(0, (a, t) => a + (t['price'] as num));
+
+  void add(Map<String, dynamic> t) {
+    if (!has(t['id'])) {
+      items.add(t);
+      notifyListeners();
+    }
+  }
+
+  void remove(dynamic id) {
+    items.removeWhere((t) => t['id'] == id);
+    notifyListeners();
+  }
+
+  void clear() {
+    if (items.isNotEmpty) {
+      items.clear();
+      notifyListeners();
+    }
+  }
+}
+
+final cart = CartModel();
+
+// Random UUID v4, used to tie all orders of one payment together
+String newGroupId() {
+  final r = Random.secure();
+  final b = List<int>.generate(16, (_) => r.nextInt(256));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  String h(int i) => b[i].toRadixString(16).padLeft(2, '0');
+  return '${h(0)}${h(1)}${h(2)}${h(3)}-${h(4)}${h(5)}-${h(6)}${h(7)}-'
+      '${h(8)}${h(9)}-${h(10)}${h(11)}${h(12)}${h(13)}${h(14)}${h(15)}';
+}
 
 String? get myId => db.auth.currentUser?.id;
 String get myEmail => db.auth.currentUser?.email ?? '';
@@ -477,7 +520,27 @@ class _StorePageState extends State<StorePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Template Store')),
+      appBar: AppBar(
+        title: const Text('Template Store'),
+        actions: [
+          if (!widget.isAdmin)
+            AnimatedBuilder(
+              animation: cart,
+              builder: (c, _) => IconButton(
+                tooltip: 'Cart',
+                onPressed: () => Navigator.push(
+                  c,
+                  MaterialPageRoute(builder: (_) => const CartPage()),
+                ),
+                icon: Badge(
+                  isLabelVisible: cart.items.isNotEmpty,
+                  label: Text('${cart.items.length}'),
+                  child: const Icon(Icons.shopping_cart_outlined),
+                ),
+              ),
+            ),
+        ],
+      ),
       floatingActionButton: widget.isAdmin
           ? FloatingActionButton.extended(
               onPressed: () async {
@@ -742,15 +805,38 @@ class _DetailPageState extends State<DetailPage> {
             onPressed: () async {
               final ok = await Navigator.push<bool>(
                 context,
-                MaterialPageRoute(builder: (_) => BuyPage(t: t)),
+                MaterialPageRoute(builder: (_) => BuyPage(items: [t])),
               );
               if (ok == true) {
                 setState(() => _loading = true);
                 _loadStatus();
               }
             },
-            child: Text('Buy  ${money(price)}'),
+            child: Text('Buy now  ${money(price)}'),
           ),
+        ),
+        const SizedBox(height: 8),
+        AnimatedBuilder(
+          animation: cart,
+          builder: (c, _) {
+            final inCart = cart.has(t['id']);
+            return SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: inCart
+                    ? () => Navigator.push(
+                          c,
+                          MaterialPageRoute(builder: (_) => const CartPage()),
+                        )
+                    : () {
+                        cart.add(t);
+                        toast(c, 'Added to cart');
+                      },
+                icon: Icon(inCart ? Icons.shopping_cart : Icons.add_shopping_cart),
+                label: Text(inCart ? 'In cart - view cart' : 'Add to cart'),
+              ),
+            );
+          },
         ),
       ]);
     }
@@ -794,8 +880,8 @@ class _DetailPageState extends State<DetailPage> {
 }
 
 class BuyPage extends StatefulWidget {
-  final Map<String, dynamic> t;
-  const BuyPage({super.key, required this.t});
+  final List<Map<String, dynamic>> items;
+  const BuyPage({super.key, required this.items});
 
   @override
   State<BuyPage> createState() => _BuyPageState();
@@ -805,11 +891,16 @@ class _BuyPageState extends State<BuyPage> {
   final _utr = TextEditingController();
   bool _busy = false;
 
+  num get _total => widget.items.fold<num>(0, (a, t) => a + (t['price'] as num));
+
+  String get _note => widget.items.length == 1
+      ? widget.items.first['title'] as String
+      : '${widget.items.length} templates';
+
   String get _upiLink {
-    final price = widget.t['price'] as num;
     return 'upi://pay?pa=$upiId&pn=${Uri.encodeComponent(payeeName)}'
-        '&am=${price.toStringAsFixed(2)}&cu=INR'
-        '&tn=${Uri.encodeComponent(widget.t['title'] as String)}';
+        '&am=${_total.toStringAsFixed(2)}&cu=INR'
+        '&tn=${Uri.encodeComponent(_note)}';
   }
 
   Future<void> _pay() async {
@@ -830,13 +921,25 @@ class _BuyPageState extends State<BuyPage> {
     }
     setState(() => _busy = true);
     try {
-      await db.from('orders').insert({
-        'user_id': myId,
-        'user_email': myEmail,
-        'template_id': widget.t['id'],
-        'utr': utr,
-        'status': 'pending',
-      });
+      // One payment = one UTR. All templates of this payment share a group id;
+      // only the first row is "primary" (the unique-UTR rule applies to it).
+      final group = newGroupId();
+      final rows = <Map<String, dynamic>>[];
+      for (var i = 0; i < widget.items.length; i++) {
+        rows.add({
+          'user_id': myId,
+          'user_email': myEmail,
+          'template_id': widget.items[i]['id'],
+          'utr': utr,
+          'status': 'pending',
+          'payment_group': group,
+          'is_primary': i == 0,
+        });
+      }
+      await db.from('orders').insert(rows);
+      for (final t in widget.items) {
+        cart.remove(t['id']);
+      }
       if (mounted) {
         toast(context, 'Request sent. Download unlocks after the master approves.');
         Navigator.pop(context, true);
@@ -859,15 +962,26 @@ class _BuyPageState extends State<BuyPage> {
 
   @override
   Widget build(BuildContext context) {
-    final price = widget.t['price'] as num;
     return Scaffold(
       appBar: AppBar(title: const Text('Payment')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          Text(widget.t['title'] as String, style: Theme.of(context).textTheme.titleLarge),
+          if (widget.items.length == 1)
+            Text(widget.items.first['title'] as String, style: Theme.of(context).textTheme.titleLarge)
+          else
+            for (final t in widget.items)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(
+                  children: [
+                    Expanded(child: Text(t['title'] as String)),
+                    Text(money(t['price'] as num)),
+                  ],
+                ),
+              ),
           const SizedBox(height: 4),
-          Text('Amount: ${money(price)}', style: Theme.of(context).textTheme.titleMedium),
+          Text('Amount: ${money(_total)}', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 20),
           const Text('Step 1: Pay with UPI'),
           const SizedBox(height: 8),
@@ -928,6 +1042,84 @@ class _BuyPageState extends State<BuyPage> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class CartPage extends StatelessWidget {
+  const CartPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: cart,
+      builder: (context, _) {
+        final items = cart.items;
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('My Cart'),
+            actions: [
+              if (items.isNotEmpty)
+                TextButton(onPressed: cart.clear, child: const Text('Clear')),
+            ],
+          ),
+          body: items.isEmpty
+              ? const Center(child: Text('Your cart is empty'))
+              : ListView.separated(
+                  padding: const EdgeInsets.all(12),
+                  itemCount: items.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (c, i) {
+                    final t = items[i];
+                    return ListTile(
+                      leading: SizedBox(
+                        width: 56,
+                        height: 56,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: PreviewImage(path: t['preview_path'] as String),
+                        ),
+                      ),
+                      title: Text(t['title'] as String, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(money(t['price'] as num)),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => cart.remove(t['id']),
+                      ),
+                    );
+                  },
+                ),
+          bottomNavigationBar: items.isEmpty
+              ? null
+              : SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Total: ${money(cart.total)}',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                        ),
+                        FilledButton(
+                          onPressed: () async {
+                            final ok = await Navigator.push<bool>(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => BuyPage(items: List.of(cart.items)),
+                              ),
+                            );
+                            if (ok == true && context.mounted) Navigator.pop(context);
+                          },
+                          child: const Text('Checkout'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+        );
+      },
     );
   }
 }
@@ -1117,9 +1309,14 @@ class _OrdersPageState extends State<OrdersPage> {
     });
   }
 
-  Future<void> _setStatus(String id, String status) async {
+  Future<void> _setStatus(Map<String, dynamic> o, String status) async {
     try {
-      await db.from('orders').update({'status': status}).eq('id', id);
+      final g = o['payment_group'];
+      if (g != null) {
+        await db.from('orders').update({'status': status}).eq('payment_group', g);
+      } else {
+        await db.from('orders').update({'status': status}).eq('id', o['id']);
+      }
       _reload();
     } catch (e) {
       if (mounted) toast(context, 'Error: $e');
@@ -1144,7 +1341,12 @@ class _OrdersPageState extends State<OrdersPage> {
               ]);
             }
             if (!s.hasData) return const Center(child: CircularProgressIndicator());
-            final items = s.data!;
+            final groups = <String, Rows>{};
+            for (final o in s.data!) {
+              final key = (o['payment_group'] ?? o['id']).toString();
+              groups.putIfAbsent(key, () => []).add(o);
+            }
+            final items = groups.values.toList();
             if (items.isEmpty) {
               return ListView(children: const [
                 Padding(padding: EdgeInsets.all(40), child: Center(child: Text('No orders yet'))),
@@ -1154,9 +1356,16 @@ class _OrdersPageState extends State<OrdersPage> {
               padding: const EdgeInsets.all(12),
               itemCount: items.length,
               itemBuilder: (c, i) {
-                final o = items[i];
-                final t = o['templates'] as Map<String, dynamic>?;
+                final g = items[i];
+                final o = g.first;
                 final status = o['status'] as String;
+                final multi = g.length > 1;
+                final t0 = o['templates'] as Map<String, dynamic>?;
+                num total = 0;
+                for (final r in g) {
+                  final tt = r['templates'] as Map<String, dynamic>?;
+                  if (tt != null) total += tt['price'] as num;
+                }
                 return Card(
                   child: Padding(
                     padding: const EdgeInsets.all(12),
@@ -1167,14 +1376,43 @@ class _OrdersPageState extends State<OrdersPage> {
                           children: [
                             Expanded(
                               child: Text(
-                                (t?['title'] ?? 'Deleted template') as String,
+                                multi
+                                    ? 'Cart order (${g.length} templates)'
+                                    : (t0?['title'] ?? 'Deleted template') as String,
                                 style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
                               ),
                             ),
                             statusChip(status),
                           ],
                         ),
-                        if (t != null) Text(money(t['price'] as num)),
+                        if (multi)
+                          for (final r in g)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      ((r['templates'] as Map<String, dynamic>?)?['title'] ?? 'Deleted template')
+                                          as String,
+                                    ),
+                                  ),
+                                  if (r['templates'] != null)
+                                    Text(money((r['templates'] as Map<String, dynamic>)['price'] as num)),
+                                  if (!widget.isAdmin && status == 'approved' && r['templates'] != null)
+                                    IconButton(
+                                      tooltip: 'Download',
+                                      icon: const Icon(Icons.download),
+                                      onPressed: () => openOriginal(
+                                        context,
+                                        (r['templates'] as Map<String, dynamic>)['file_path'] as String,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                        if (multi) Text('Total: ${money(total)}'),
+                        if (!multi && t0 != null) Text(money(t0['price'] as num)),
                         if (widget.isAdmin) Text('User: ${o['user_email'] ?? ''}'),
                         Text('UTR: ${o['utr'] ?? ''}'),
                         const SizedBox(height: 8),
@@ -1183,21 +1421,21 @@ class _OrdersPageState extends State<OrdersPage> {
                             mainAxisAlignment: MainAxisAlignment.end,
                             children: [
                               TextButton(
-                                onPressed: () => _setStatus(o['id'] as String, 'rejected'),
+                                onPressed: () => _setStatus(o, 'rejected'),
                                 child: const Text('Reject'),
                               ),
                               const SizedBox(width: 8),
                               FilledButton(
-                                onPressed: () => _setStatus(o['id'] as String, 'approved'),
+                                onPressed: () => _setStatus(o, 'approved'),
                                 child: const Text('Approve'),
                               ),
                             ],
                           ),
-                        if (!widget.isAdmin && status == 'approved' && t != null)
+                        if (!multi && !widget.isAdmin && status == 'approved' && t0 != null)
                           Align(
                             alignment: Alignment.centerRight,
                             child: FilledButton.tonalIcon(
-                              onPressed: () => openOriginal(context, t['file_path'] as String),
+                              onPressed: () => openOriginal(context, t0['file_path'] as String),
                               icon: const Icon(Icons.download),
                               label: const Text('Download'),
                             ),
@@ -1564,7 +1802,10 @@ class ProfilePage extends StatelessWidget {
             ),
           const SizedBox(height: 24),
           OutlinedButton.icon(
-            onPressed: () => db.auth.signOut(),
+            onPressed: () {
+              cart.clear();
+              db.auth.signOut();
+            },
             icon: const Icon(Icons.logout),
             label: const Text('Logout'),
           ),
