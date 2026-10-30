@@ -165,12 +165,39 @@ class _LoginPageState extends State<LoginPage> {
       if (_signup) {
         final res = await db.auth.signUp(email: email, password: pass);
         if (res.session == null && mounted) {
-          toast(context, 'Account ban gaya. Ab login karo.');
-          setState(() => _signup = false);
+          toast(context, 'Email par code bheja gaya hai');
+          await Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => OtpPage(email: email, recovery: false)),
+          );
         }
       } else {
         await db.auth.signInWithPassword(email: email, password: pass);
       }
+    } on AuthException catch (e) {
+      if (mounted) toast(context, e.message);
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _forgot() async {
+    final email = _email.text.trim();
+    if (email.isEmpty) {
+      toast(context, 'Pehle upar email daalo');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await db.auth.resetPasswordForEmail(email);
+      if (!mounted) return;
+      toast(context, 'Email par code bheja gaya hai');
+      await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => OtpPage(email: email, recovery: true)),
+      );
     } on AuthException catch (e) {
       if (mounted) toast(context, e.message);
     } catch (e) {
@@ -216,9 +243,91 @@ class _LoginPageState extends State<LoginPage> {
                 onPressed: () => setState(() => _signup = !_signup),
                 child: Text(_signup ? 'Account hai? Login karo' : 'Naya account banao'),
               ),
+              if (!_signup)
+                TextButton(
+                  onPressed: _busy ? null : _forgot,
+                  child: const Text('Password bhool gaye?'),
+                ),
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class OtpPage extends StatefulWidget {
+  final String email;
+  final bool recovery;
+  const OtpPage({super.key, required this.email, required this.recovery});
+
+  @override
+  State<OtpPage> createState() => _OtpPageState();
+}
+
+class _OtpPageState extends State<OtpPage> {
+  final _code = TextEditingController();
+  final _newPass = TextEditingController();
+  bool _busy = false;
+
+  Future<void> _verify() async {
+    final code = _code.text.trim();
+    if (code.length < 6) {
+      toast(context, 'Email me aaya code daalo');
+      return;
+    }
+    if (widget.recovery && _newPass.text.length < 6) {
+      toast(context, 'Naya password kam se kam 6 akshar ka rakho');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      await db.auth.verifyOTP(
+        email: widget.email,
+        token: code,
+        type: widget.recovery ? OtpType.recovery : OtpType.signup,
+      );
+      if (widget.recovery) {
+        await db.auth.updateUser(UserAttributes(password: _newPass.text));
+      }
+      if (mounted) Navigator.of(context).popUntil((r) => r.isFirst);
+    } on AuthException catch (e) {
+      if (mounted) toast(context, e.message);
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.recovery ? 'Password reset' : 'Email verify')),
+      body: ListView(
+        padding: const EdgeInsets.all(24),
+        children: [
+          Text('Code is email par bheja gaya hai:\n${widget.email}'),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _code,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(labelText: 'Email wala code', border: OutlineInputBorder()),
+          ),
+          if (widget.recovery) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _newPass,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Naya password', border: OutlineInputBorder()),
+            ),
+          ],
+          const SizedBox(height: 20),
+          FilledButton(
+            onPressed: _busy ? null : _verify,
+            child: Text(_busy ? 'Ruko...' : (widget.recovery ? 'Password badlo' : 'Verify karo')),
+          ),
+        ],
       ),
     );
   }
