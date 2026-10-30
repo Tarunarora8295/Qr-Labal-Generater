@@ -91,7 +91,7 @@ Widget statusChip(String s) {
       borderRadius: BorderRadius.circular(20),
     ),
     child: Text(
-      s.toUpperCase(),
+      s == 'approved' ? 'COMPLETED' : s.toUpperCase(),
       style: TextStyle(color: c, fontSize: 11, fontWeight: FontWeight.bold),
     ),
   );
@@ -160,8 +160,127 @@ class App extends StatelessWidget {
     return MaterialApp(
       title: 'Template Store',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+      theme: buildTheme(),
       home: const AuthGate(),
+    );
+  }
+}
+
+
+// ---------------------------------------------------------------- THEME + LOGO
+
+const kBrandA = Color(0xFF4F46E5); // indigo
+const kBrandB = Color(0xFF7C3AED); // violet
+
+ThemeData buildTheme() {
+  final scheme = ColorScheme.fromSeed(seedColor: kBrandA, brightness: Brightness.light);
+  return ThemeData(
+    useMaterial3: true,
+    colorScheme: scheme,
+    scaffoldBackgroundColor: const Color(0xFFF6F6FB),
+    appBarTheme: const AppBarTheme(
+      backgroundColor: Color(0xFFF6F6FB),
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      titleTextStyle: TextStyle(
+        color: Color(0xFF1B1B2F),
+        fontSize: 20,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        minimumSize: const Size.fromHeight(50),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size.fromHeight(50),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
+    ),
+    navigationBarTheme: NavigationBarThemeData(
+      backgroundColor: Colors.white,
+      surfaceTintColor: Colors.transparent,
+      indicatorColor: kBrandA.withAlpha(30),
+    ),
+  );
+}
+
+// Rounded, filled text-field look used across the app
+InputDecoration fieldDeco(String label, IconData icon, {Widget? suffix, String? hint}) {
+  return InputDecoration(
+    labelText: label,
+    hintText: hint,
+    prefixIcon: Icon(icon),
+    suffixIcon: suffix,
+    filled: true,
+    fillColor: const Color(0xFFF1F1F9),
+    border: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: BorderSide.none,
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: const BorderSide(color: kBrandA, width: 1.6),
+    ),
+  );
+}
+
+// App logo drawn in code (no image asset needed)
+class AppLogo extends StatelessWidget {
+  final double size;
+  final bool inverse; // white tile with coloured icon (for gradient backgrounds)
+  const AppLogo({super.key, this.size = 56, this.inverse = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(size * 0.3),
+        gradient: inverse
+            ? null
+            : const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [kBrandA, kBrandB],
+              ),
+        color: inverse ? Colors.white : null,
+        boxShadow: [
+          BoxShadow(
+            color: (inverse ? Colors.black : kBrandA).withAlpha(70),
+            blurRadius: size * 0.25,
+            offset: Offset(0, size * 0.1),
+          ),
+        ],
+      ),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          ShaderMask(
+            blendMode: BlendMode.srcIn,
+            shaderCallback: (r) => (inverse
+                    ? const LinearGradient(colors: [kBrandA, kBrandB])
+                    : const LinearGradient(colors: [Colors.white, Colors.white]))
+                .createShader(r),
+            child: Icon(Icons.dashboard_customize_rounded, size: size * 0.54),
+          ),
+          Positioned(
+            top: size * 0.14,
+            right: size * 0.14,
+            child: Icon(
+              Icons.auto_awesome,
+              size: size * 0.2,
+              color: inverse ? const Color(0xFFFFB020) : const Color(0xFFFFE08A),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -195,6 +314,7 @@ class _LoginPageState extends State<LoginPage> {
   final _email = TextEditingController();
   final _pass = TextEditingController();
   bool _signup = false;
+  bool _obscure = true;
   bool _busy = false;
 
   Future<void> _submit() async {
@@ -254,45 +374,130 @@ class _LoginPageState extends State<LoginPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.collections, size: 72, color: Theme.of(context).colorScheme.primary),
-              const SizedBox(height: 8),
-              Text('Template Store', style: Theme.of(context).textTheme.headlineMedium),
-              const SizedBox(height: 28),
-              TextField(
-                controller: _email,
-                keyboardType: TextInputType.emailAddress,
-                decoration: const InputDecoration(labelText: 'Email', border: OutlineInputBorder()),
+      body: Container(
+        width: double.infinity,
+        height: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [kBrandA, kBrandB],
+          ),
+        ),
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const AppLogo(size: 92, inverse: true),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Template Store',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 30,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Premium templates, ready to download',
+                    style: TextStyle(color: Colors.white.withAlpha(210), fontSize: 14),
+                  ),
+                  const SizedBox(height: 28),
+                  Container(
+                    constraints: const BoxConstraints(maxWidth: 440),
+                    padding: const EdgeInsets.fromLTRB(22, 24, 22, 14),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(26),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withAlpha(40),
+                          blurRadius: 30,
+                          offset: const Offset(0, 14),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          _signup ? 'Create account' : 'Welcome back',
+                          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          _signup ? 'Sign up to start shopping' : 'Login to continue',
+                          style: TextStyle(color: Colors.grey.shade600),
+                        ),
+                        const SizedBox(height: 20),
+                        TextField(
+                          controller: _email,
+                          keyboardType: TextInputType.emailAddress,
+                          autofillHints: const [AutofillHints.email],
+                          decoration: fieldDeco('Email', Icons.mail_outline_rounded),
+                        ),
+                        const SizedBox(height: 14),
+                        TextField(
+                          controller: _pass,
+                          obscureText: _obscure,
+                          decoration: fieldDeco(
+                            'Password',
+                            Icons.lock_outline_rounded,
+                            suffix: IconButton(
+                              icon: Icon(
+                                _obscure
+                                    ? Icons.visibility_off_outlined
+                                    : Icons.visibility_outlined,
+                              ),
+                              onPressed: () => setState(() => _obscure = !_obscure),
+                            ),
+                          ),
+                        ),
+                        if (!_signup)
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton(
+                              onPressed: _busy ? null : _forgot,
+                              child: const Text('Forgot password?'),
+                            ),
+                          )
+                        else
+                          const SizedBox(height: 10),
+                        const SizedBox(height: 6),
+                        FilledButton(
+                          onPressed: _busy ? null : _submit,
+                          child: _busy
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.4,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : Text(_signup ? 'Create account' : 'Login'),
+                        ),
+                        const SizedBox(height: 6),
+                        TextButton(
+                          onPressed: () => setState(() => _signup = !_signup),
+                          child: Text(
+                            _signup
+                                ? 'Already have an account? Login'
+                                : "Don't have an account? Sign up",
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _pass,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 20),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: _busy ? null : _submit,
-                  child: Text(_busy ? 'Please wait...' : (_signup ? 'Create account' : 'Login')),
-                ),
-              ),
-              TextButton(
-                onPressed: () => setState(() => _signup = !_signup),
-                child: Text(_signup ? 'Already have an account? Login' : 'Create a new account'),
-              ),
-              if (!_signup)
-                TextButton(
-                  onPressed: _busy ? null : _forgot,
-                  child: const Text('Forgot password?'),
-                ),
-            ],
+            ),
           ),
         ),
       ),
@@ -521,7 +726,14 @@ class _StorePageState extends State<StorePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Template Store'),
+        title: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AppLogo(size: 32),
+            SizedBox(width: 10),
+            Text('Template Store'),
+          ],
+        ),
         actions: [
           if (!widget.isAdmin)
             AnimatedBuilder(
@@ -589,8 +801,14 @@ class _StorePageState extends State<StorePage> {
                               setState(() => _q = '');
                             },
                           ),
-                    border: const OutlineInputBorder(),
+                    filled: true,
+                    fillColor: Colors.white,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(30),
+                      borderSide: BorderSide.none,
+                    ),
                     isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
                   ),
                 ),
               ),
@@ -642,6 +860,13 @@ class _StorePageState extends State<StorePage> {
                           itemBuilder: (c, i) {
                             final t = items[i];
                             return Card(
+                              elevation: 3,
+                              shadowColor: Colors.black26,
+                              color: Colors.white,
+                              surfaceTintColor: Colors.transparent,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
                               clipBehavior: Clip.antiAlias,
                               child: InkWell(
                                 onTap: () async {
@@ -670,7 +895,10 @@ class _StorePageState extends State<StorePage> {
                                           ),
                                           Text(
                                             money(t['price'] as num),
-                                            style: TextStyle(color: Theme.of(context).colorScheme.primary),
+                                            style: TextStyle(
+                                              color: Theme.of(context).colorScheme.primary,
+                                              fontWeight: FontWeight.w800,
+                                            ),
                                           ),
                                         ],
                                       ),
@@ -919,6 +1147,13 @@ class _BuyPageState extends State<BuyPage> {
       toast(context, 'Enter the payment UTR / Transaction ID');
       return;
     }
+    final meta = db.auth.currentUser?.userMetadata ?? {};
+    final cname = (meta['full_name'] ?? '').toString().trim();
+    final cphone = (meta['phone'] ?? '').toString().trim();
+    if (cname.isEmpty || cphone.isEmpty) {
+      toast(context, 'Please add your name and phone number in Profile first');
+      return;
+    }
     setState(() => _busy = true);
     try {
       // One payment = one UTR. All templates of this payment share a group id;
@@ -934,6 +1169,8 @@ class _BuyPageState extends State<BuyPage> {
           'status': 'pending',
           'payment_group': group,
           'is_primary': i == 0,
+          'customer_name': cname,
+          'customer_phone': cphone,
         });
       }
       await db.from('orders').insert(rows);
@@ -1294,6 +1531,7 @@ class OrdersPage extends StatefulWidget {
 
 class _OrdersPageState extends State<OrdersPage> {
   late Future<Rows> _f = _load();
+  String _filter = 'all'; // all | pending | approved | rejected
 
   Future<Rows> _load() async {
     final r = await db
@@ -1307,6 +1545,54 @@ class _OrdersPageState extends State<OrdersPage> {
     setState(() {
       _f = _load();
     });
+  }
+
+  Widget _tile(String label, String key, int n, Color color) {
+    final sel = _filter == key;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _filter = sel ? 'all' : key),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: color.withAlpha(sel ? 55 : 28),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: sel ? color : Colors.transparent, width: 1.6),
+          ),
+          child: Column(
+            children: [
+              Text(
+                '$n',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: color),
+              ),
+              const SizedBox(height: 2),
+              Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _when(dynamic v) {
+    final d = DateTime.tryParse('${v ?? ''}')?.toLocal();
+    if (d == null) return '';
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(d.day)}/${two(d.month)}/${d.year}  ${two(d.hour)}:${two(d.minute)}';
+  }
+
+  Widget _infoRow(IconData icon, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: Colors.grey.shade600),
+          const SizedBox(width: 6),
+          Expanded(child: SelectableText(text)),
+        ],
+      ),
+    );
   }
 
   Future<void> _setStatus(Map<String, dynamic> o, String status) async {
@@ -1346,13 +1632,71 @@ class _OrdersPageState extends State<OrdersPage> {
               final key = (o['payment_group'] ?? o['id']).toString();
               groups.putIfAbsent(key, () => []).add(o);
             }
-            final items = groups.values.toList();
-            if (items.isEmpty) {
-              return ListView(children: const [
-                Padding(padding: EdgeInsets.all(40), child: Center(child: Text('No orders yet'))),
-              ]);
+            final all = groups.values.toList();
+            int count(String st) => all.where((g) => g.first['status'] == st).length;
+            num revenue = 0;
+            for (final g in all) {
+              if (g.first['status'] != 'approved') continue;
+              for (final r in g) {
+                final tt = r['templates'] as Map<String, dynamic>?;
+                if (tt != null) revenue += tt['price'] as num;
+              }
             }
-            return ListView.builder(
+            final items = (widget.isAdmin && _filter != 'all')
+                ? all.where((g) => g.first['status'] == _filter).toList()
+                : all;
+
+            return Column(
+              children: [
+                if (widget.isAdmin)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+                    child: Column(
+                      children: [
+                        Row(
+                          children: [
+                            _tile('Pending', 'pending', count('pending'), Colors.orange),
+                            const SizedBox(width: 10),
+                            _tile('Completed', 'approved', count('approved'), Colors.green),
+                            const SizedBox(width: 10),
+                            _tile('Rejected', 'rejected', count('rejected'), Colors.red),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Text(
+                              _filter == 'all'
+                                  ? 'All orders (${all.length})'
+                                  : 'Showing ${_filter == 'approved' ? 'completed' : _filter} (${items.length})',
+                              style: const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            const Spacer(),
+                            Text(
+                              'Earned: ${money(revenue)}',
+                              style: const TextStyle(
+                                color: Colors.green,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                Expanded(
+                  child: items.isEmpty
+                      ? ListView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          children: const [
+                            Padding(
+                              padding: EdgeInsets.all(40),
+                              child: Center(child: Text('No orders found')),
+                            ),
+                          ],
+                        )
+                      : ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.all(12),
               itemCount: items.length,
               itemBuilder: (c, i) {
@@ -1413,7 +1757,24 @@ class _OrdersPageState extends State<OrdersPage> {
                             ),
                         if (multi) Text('Total: ${money(total)}'),
                         if (!multi && t0 != null) Text(money(t0['price'] as num)),
-                        if (widget.isAdmin) Text('User: ${o['user_email'] ?? ''}'),
+                        if (widget.isAdmin) ...[
+                          const Divider(height: 18),
+                          _infoRow(
+                            Icons.person_outline_rounded,
+                            (o['customer_name'] ?? '').toString().isEmpty
+                                ? 'Name not provided'
+                                : o['customer_name'].toString(),
+                          ),
+                          _infoRow(
+                            Icons.phone_outlined,
+                            (o['customer_phone'] ?? '').toString().isEmpty
+                                ? 'Phone not provided'
+                                : o['customer_phone'].toString(),
+                          ),
+                          _infoRow(Icons.mail_outline_rounded, '${o['user_email'] ?? ''}'),
+                        ],
+                        if (_when(o['created_at']).isNotEmpty)
+                          _infoRow(Icons.schedule_rounded, _when(o['created_at'])),
                         Text('UTR: ${o['utr'] ?? ''}'),
                         const SizedBox(height: 8),
                         if (widget.isAdmin && status == 'pending')
@@ -1445,6 +1806,9 @@ class _OrdersPageState extends State<OrdersPage> {
                   ),
                 );
               },
+            ),
+                ),
+              ],
             );
           },
         ),
@@ -1736,9 +2100,34 @@ class _TicketPageState extends State<TicketPage> {
 
 // ---------------------------------------------------------------- PROFILE
 
-class ProfilePage extends StatelessWidget {
+class ProfilePage extends StatefulWidget {
   final bool isAdmin;
   const ProfilePage({super.key, required this.isAdmin});
+
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  final _name = TextEditingController();
+  final _phone = TextEditingController();
+  bool _saving = false;
+
+  Map<String, dynamic> get _meta => db.auth.currentUser?.userMetadata ?? {};
+
+  @override
+  void initState() {
+    super.initState();
+    _name.text = (_meta['full_name'] ?? '').toString();
+    _phone.text = (_meta['phone'] ?? '').toString();
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _phone.dispose();
+    super.dispose();
+  }
 
   Future<Map<String, int>> _stats() async {
     final u = asRows(await db.from('profiles').select('id'));
@@ -1753,19 +2142,183 @@ class ProfilePage extends StatelessWidget {
     };
   }
 
+  Future<void> _save() async {
+    final name = _name.text.trim();
+    final phone = _phone.text.replaceAll(' ', '').trim();
+    if (name.isEmpty) {
+      toast(context, 'Please enter your name');
+      return;
+    }
+    if (phone.isNotEmpty && !RegExp(r'^\+?\d{10,13}$').hasMatch(phone)) {
+      toast(context, 'Enter a valid phone number (10 digits)');
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      await db.auth.updateUser(UserAttributes(data: {'full_name': name, 'phone': phone}));
+      if (mounted) {
+        FocusScope.of(context).unfocus();
+        toast(context, 'Profile saved');
+      }
+    } on AuthException catch (e) {
+      if (mounted) toast(context, e.message);
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final isAdmin = widget.isAdmin;
+    final savedName = (_meta['full_name'] ?? '').toString().trim();
+    final initial = savedName.isNotEmpty
+        ? savedName[0].toUpperCase()
+        : (myEmail.isNotEmpty ? myEmail[0].toUpperCase() : '?');
+
     return Scaffold(
-      appBar: AppBar(title: Text(isAdmin ? 'Master Dashboard' : 'Profile')),
+      appBar: AppBar(title: Text(isAdmin ? 'Master Dashboard' : 'My Profile')),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
         children: [
-          ListTile(
-            leading: const Icon(Icons.account_circle, size: 40),
-            title: Text(myEmail),
-            subtitle: Text(isAdmin ? 'Master account' : 'User account'),
+          // ---- header card
+          Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              gradient: const LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [kBrandA, kBrandB],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: kBrandA.withAlpha(70),
+                  blurRadius: 20,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  radius: 34,
+                  backgroundColor: Colors.white,
+                  child: Text(
+                    initial,
+                    style: const TextStyle(
+                      fontSize: 30,
+                      fontWeight: FontWeight.w800,
+                      color: kBrandA,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        savedName.isEmpty ? 'Add your name' : savedName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        myEmail,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: Colors.white.withAlpha(220)),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withAlpha(45),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          isAdmin ? 'MASTER' : 'USER',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
-          if (isAdmin)
+          const SizedBox(height: 18),
+
+          // ---- edit details card
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(22),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(14),
+                  blurRadius: 16,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Personal details',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _name,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: fieldDeco('Full name', Icons.person_outline_rounded),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _phone,
+                  keyboardType: TextInputType.phone,
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9+ ]'))],
+                  decoration: fieldDeco('Phone number', Icons.phone_outlined, hint: '98765 43210'),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  initialValue: myEmail,
+                  enabled: false,
+                  decoration: fieldDeco('Email', Icons.mail_outline_rounded),
+                ),
+                const SizedBox(height: 18),
+                FilledButton.icon(
+                  onPressed: _saving ? null : _save,
+                  icon: _saving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2.2, color: Colors.white),
+                        )
+                      : const Icon(Icons.check_rounded),
+                  label: Text(_saving ? 'Saving...' : 'Save changes'),
+                ),
+              ],
+            ),
+          ),
+
+          if (isAdmin) ...[
+            const SizedBox(height: 18),
             FutureBuilder<Map<String, int>>(
               future: _stats(),
               builder: (context, s) {
@@ -1785,11 +2338,24 @@ class ProfilePage extends StatelessWidget {
                   children: s.data!.entries
                       .map(
                         (e) => Card(
+                          elevation: 2,
+                          color: Colors.white,
+                          surfaceTintColor: Colors.transparent,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
                           child: Center(
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Text('${e.value}', style: Theme.of(context).textTheme.headlineMedium),
+                                Text(
+                                  '${e.value}',
+                                  style: const TextStyle(
+                                    fontSize: 26,
+                                    fontWeight: FontWeight.w800,
+                                    color: kBrandA,
+                                  ),
+                                ),
                                 Text(e.key),
                               ],
                             ),
@@ -1800,13 +2366,14 @@ class ProfilePage extends StatelessWidget {
                 );
               },
             ),
-          const SizedBox(height: 24),
+          ],
+          const SizedBox(height: 22),
           OutlinedButton.icon(
             onPressed: () {
               cart.clear();
               db.auth.signOut();
             },
-            icon: const Icon(Icons.logout),
+            icon: const Icon(Icons.logout_rounded),
             label: const Text('Logout'),
           ),
         ],
