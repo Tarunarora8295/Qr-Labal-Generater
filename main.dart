@@ -69,6 +69,35 @@ void toast(BuildContext c, String m) {
   ScaffoldMessenger.of(c).showSnackBar(SnackBar(content: Text(m)));
 }
 
+final GlobalKey<ScaffoldState> shellKey = GlobalKey<ScaffoldState>();
+final ValueNotifier<int> shellTab = ValueNotifier<int>(0);
+final ValueNotifier<Set<String>> favs = ValueNotifier<Set<String>>(<String>{});
+
+// Saved (favourite) template ids live in the user's own metadata - no database table needed
+void loadFavs() {
+  final raw = db.auth.currentUser?.userMetadata?['favs'];
+  favs.value = raw is List ? raw.map((e) => e.toString()).toSet() : <String>{};
+}
+
+Future<void> toggleFav(dynamic id) async {
+  final k = id.toString();
+  final next = Set<String>.from(favs.value);
+  if (!next.remove(k)) next.add(k);
+  favs.value = next;
+  try {
+    await db.auth.updateUser(UserAttributes(data: {'favs': next.toList()}));
+  } catch (_) {}
+}
+
+// Menu (drawer) button for the main tabs; null on pushed pages so the normal back arrow shows
+Widget? menuButton(BuildContext c) {
+  if (Navigator.of(c).canPop()) return null;
+  return IconButton(
+    icon: const Icon(Icons.menu_rounded),
+    onPressed: () => shellKey.currentState?.openDrawer(),
+  );
+}
+
 String money(num p) => '₹${p % 1 == 0 ? p.toInt().toString() : p.toStringAsFixed(2)}';
 
 Color statusColor(String s) {
@@ -214,14 +243,14 @@ ThemeData buildTheme() {
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        minimumSize: const Size.fromHeight(50),
+        minimumSize: const Size(0, 50),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
       ),
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
-        minimumSize: const Size.fromHeight(50),
+        minimumSize: const Size(0, 50),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       ),
     ),
@@ -649,7 +678,40 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  int _i = 0;
+  final ValueNotifier<int> _pending = ValueNotifier<int>(0);
+  Timer? _timer;
+  int? _lastPending;
+
+  @override
+  void initState() {
+    super.initState();
+    shellTab.value = 0;
+    loadFavs();
+    if (widget.isAdmin) {
+      _poll();
+      _timer = Timer.periodic(const Duration(seconds: 30), (_) => _poll());
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _pending.dispose();
+    super.dispose();
+  }
+
+  // Admin: count pending orders, show a badge and alert when a new one arrives
+  Future<void> _poll() async {
+    try {
+      final r = asRows(await db.from('orders').select('id, payment_group').eq('status', 'pending'));
+      final n = r.map((o) => (o['payment_group'] ?? o['id']).toString()).toSet().length;
+      if (_lastPending != null && n > _lastPending! && mounted) {
+        toast(context, 'New order received');
+      }
+      _lastPending = n;
+      _pending.value = n;
+    } catch (_) {}
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -658,34 +720,158 @@ class _HomeShellState extends State<HomeShell> {
       StorePage(isAdmin: a),
       OrdersPage(isAdmin: a),
       SupportPage(isAdmin: a),
-      ProfilePage(isAdmin: a),
     ];
-    return Scaffold(
-      body: pages[_i],
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _i,
-        onDestinationSelected: (v) => setState(() => _i = v),
-        destinations: [
-          const NavigationDestination(
-            icon: Icon(Icons.storefront_outlined),
-            selectedIcon: Icon(Icons.storefront),
-            label: 'Store',
+    Widget ordersIcon(IconData ic) => ValueListenableBuilder<int>(
+          valueListenable: _pending,
+          builder: (c, n, _) => Badge(
+            isLabelVisible: a && n > 0,
+            label: Text('$n'),
+            child: Icon(ic),
           ),
-          NavigationDestination(
-            icon: const Icon(Icons.receipt_long_outlined),
-            selectedIcon: const Icon(Icons.receipt_long),
-            label: a ? 'Orders' : 'My Purchases',
+        );
+    return ValueListenableBuilder<int>(
+      valueListenable: shellTab,
+      builder: (context, i, _) => Scaffold(
+        key: shellKey,
+        drawer: AppDrawer(isAdmin: a),
+        body: pages[i],
+        bottomNavigationBar: NavigationBar(
+          elevation: 12,
+          shadowColor: Colors.black,
+          height: 68,
+          selectedIndex: i,
+          onDestinationSelected: (v) {
+            shellTab.value = v;
+            if (a) _poll();
+          },
+          destinations: [
+            const NavigationDestination(
+              icon: Icon(Icons.storefront_outlined),
+              selectedIcon: Icon(Icons.storefront),
+              label: 'Shop',
+            ),
+            NavigationDestination(
+              icon: ordersIcon(Icons.receipt_long_outlined),
+              selectedIcon: ordersIcon(Icons.receipt_long),
+              label: a ? 'Orders' : 'My Orders',
+            ),
+            const NavigationDestination(
+              icon: Icon(Icons.support_agent_outlined),
+              selectedIcon: Icon(Icons.support_agent),
+              label: 'Support',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// Slide-out side menu: profile, terms and logout
+class AppDrawer extends StatelessWidget {
+  final bool isAdmin;
+  const AppDrawer({super.key, required this.isAdmin});
+
+  @override
+  Widget build(BuildContext context) {
+    final meta = db.auth.currentUser?.userMetadata ?? {};
+    final name = (meta['full_name'] ?? '').toString().trim();
+    final initial = name.isNotEmpty
+        ? name[0].toUpperCase()
+        : (myEmail.isNotEmpty ? myEmail[0].toUpperCase() : '?');
+
+    Widget item(IconData ic, String t, VoidCallback onTap, {Color? color}) => ListTile(
+          leading: Icon(ic, color: color ?? kBrandA),
+          title: Text(t, style: TextStyle(fontWeight: FontWeight.w700, color: color)),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 2),
+          onTap: onTap,
+        );
+
+    return Drawer(
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.horizontal(right: Radius.circular(28)),
+      ),
+      child: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            padding: EdgeInsets.fromLTRB(22, MediaQuery.of(context).padding.top + 26, 22, 22),
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [kBrandA, kBrandB],
+              ),
+              borderRadius: BorderRadius.only(topRight: Radius.circular(28)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(
+                  radius: 32,
+                  backgroundColor: Colors.white,
+                  child: Text(
+                    initial,
+                    style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800, color: kBrandA),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  name.isEmpty ? 'Welcome' : name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  myEmail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: Colors.white.withAlpha(215), fontSize: 13),
+                ),
+              ],
+            ),
           ),
-          NavigationDestination(
-            icon: const Icon(Icons.support_agent_outlined),
-            selectedIcon: const Icon(Icons.support_agent),
-            label: a ? 'Support Inbox' : 'Support',
+          const SizedBox(height: 8),
+          item(
+            isAdmin ? Icons.dashboard_outlined : Icons.person_outline_rounded,
+            isAdmin ? 'Master Dashboard' : 'My Profile',
+            () {
+              final nav = Navigator.of(context);
+              nav.pop();
+              nav.push(MaterialPageRoute(builder: (_) => ProfilePage(isAdmin: isAdmin)));
+            },
           ),
-          NavigationDestination(
-            icon: const Icon(Icons.person_outline),
-            selectedIcon: const Icon(Icons.person),
-            label: a ? 'Master' : 'Profile',
+          if (!isAdmin)
+            item(Icons.description_outlined, 'Terms & Privacy', () {
+              Navigator.of(context).pop();
+              showDialog<void>(
+                context: shellKey.currentContext ?? context,
+                builder: (c) => AlertDialog(
+                  title: const Text('Terms & Privacy'),
+                  content: const Text(
+                    'Payments are verified manually, so approval can take some time.\n\n'
+                    'Templates unlock for download only after your payment is approved.\n\n'
+                    'Your name, phone number and email are used only to process your orders '
+                    'and support requests.',
+                  ),
+                  actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Close'))],
+                ),
+              );
+            }),
+          const Spacer(),
+          const Divider(height: 1),
+          item(
+            Icons.logout_rounded,
+            'Logout',
+            () {
+              cart.clear();
+              db.auth.signOut();
+            },
+            color: const Color(0xFFD92D20),
           ),
+          SizedBox(height: MediaQuery.of(context).padding.bottom + 8),
         ],
       ),
     );
@@ -724,6 +910,89 @@ class _StorePageState extends State<StorePage> {
   final _search = TextEditingController();
   String _q = '';
   String _cat = 'All';
+  String _sort = 'new'; // new | low | high
+  late Future<Map<String, int>> _bf = _loadBanner();
+
+  @override
+  void initState() {
+    super.initState();
+    favs.addListener(_onFav);
+  }
+
+  @override
+  void dispose() {
+    favs.removeListener(_onFav);
+    _search.dispose();
+    super.dispose();
+  }
+
+  void _onFav() {
+    if (mounted) setState(() {});
+  }
+
+  Future<Map<String, int>> _loadBanner() async {
+    try {
+      final r = asRows(
+        await db.from('orders').select('id, status, created_at, payment_group').eq('user_id', myId!),
+      );
+      final pend = <String>{};
+      final done = <String>{};
+      final cutoff = DateTime.now().subtract(const Duration(days: 3));
+      for (final o in r) {
+        final k = (o['payment_group'] ?? o['id']).toString();
+        if (o['status'] == 'pending') {
+          pend.add(k);
+        } else if (o['status'] == 'approved') {
+          final d = DateTime.tryParse('${o['created_at']}');
+          if (d != null && d.isAfter(cutoff)) done.add(k);
+        }
+      }
+      return {'pending': pend.length, 'done': done.length};
+    } catch (_) {
+      return {'pending': 0, 'done': 0};
+    }
+  }
+
+  Widget _banner() {
+    return FutureBuilder<Map<String, int>>(
+      future: _bf,
+      builder: (c, s) {
+        final p = s.data?['pending'] ?? 0;
+        final d = s.data?['done'] ?? 0;
+        if (p == 0 && d == 0) return const SizedBox.shrink();
+        final pend = p > 0;
+        final color = pend ? Colors.orange : Colors.green;
+        final n = pend ? p : d;
+        return GestureDetector(
+          onTap: () => shellTab.value = 1,
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: color.withAlpha(28),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: color.withAlpha(120)),
+            ),
+            child: Row(
+              children: [
+                Icon(pend ? Icons.hourglass_top_rounded : Icons.check_circle_rounded, color: color),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    pend
+                        ? 'Your payment is being verified ($n order${n > 1 ? 's' : ''})'
+                        : '$n order${n > 1 ? 's' : ''} completed - tap to download',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                const Icon(Icons.chevron_right_rounded),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
 
   Future<Rows> _load() async {
     final r = await db.from('templates').select().order('created_at', ascending: false);
@@ -733,49 +1002,318 @@ class _StorePageState extends State<StorePage> {
   void _reload() {
     setState(() {
       _f = _load();
+      _bf = _loadBanner();
     });
   }
 
   Rows _filter(Rows all) {
     final q = _q.trim().toLowerCase();
-    return all.where((t) {
-      final okCat = _cat == 'All' || (t['category'] ?? 'General') == _cat;
+    final out = all.where((t) {
+      final okCat = _cat == 'All' ||
+          (_cat == 'Saved'
+              ? favs.value.contains(t['id'].toString())
+              : (t['category'] ?? 'General') == _cat);
       final okQ = q.isEmpty || (t['title'] as String).toLowerCase().contains(q);
       return okCat && okQ;
     }).toList();
+    if (_sort == 'low') {
+      out.sort((a, b) => (a['price'] as num).compareTo(b['price'] as num));
+    } else if (_sort == 'high') {
+      out.sort((a, b) => (b['price'] as num).compareTo(a['price'] as num));
+    }
+    return out;
+  }
+
+  Widget _header(BuildContext context) {
+    final name = (db.auth.currentUser?.userMetadata?['full_name'] ?? '').toString().trim();
+    final first = name.isEmpty ? 'there' : name.split(' ').first;
+    return Container(
+      padding: EdgeInsets.fromLTRB(18, MediaQuery.of(context).padding.top + 14, 18, 18),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [kBrandA, kBrandB],
+        ),
+        borderRadius: BorderRadius.vertical(bottom: Radius.circular(30)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.white.withAlpha(40),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: IconButton(
+                  tooltip: 'Menu',
+                  color: Colors.white,
+                  onPressed: () => shellKey.currentState?.openDrawer(),
+                  icon: const Icon(Icons.menu_rounded, color: Colors.white),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.isAdmin ? 'Master panel' : 'Hi, $first 👋',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 21,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      widget.isAdmin ? 'Manage your templates' : 'Find your perfect template',
+                      style: TextStyle(color: Colors.white.withAlpha(215), fontSize: 13),
+                    ),
+                  ],
+                ),
+              ),
+              if (!widget.isAdmin)
+                AnimatedBuilder(
+                  animation: cart,
+                  builder: (c, _) => Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withAlpha(40),
+                      shape: BoxShape.circle,
+                    ),
+                    child: IconButton(
+                      tooltip: 'Cart',
+                      color: Colors.white,
+                      onPressed: () => Navigator.push(
+                        c,
+                        MaterialPageRoute(builder: (_) => const CartPage()),
+                      ),
+                      icon: Badge(
+                        isLabelVisible: cart.items.isNotEmpty,
+                        label: Text('${cart.items.length}'),
+                        child: const Icon(Icons.shopping_cart_outlined, color: Colors.white),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _search,
+            onChanged: (v) => setState(() => _q = v),
+            decoration: InputDecoration(
+              hintText: 'Search templates',
+              prefixIcon: const Icon(Icons.search_rounded),
+              suffixIcon: _q.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.close_rounded),
+                      onPressed: () {
+                        _search.clear();
+                        setState(() => _q = '');
+                      },
+                    ),
+              filled: true,
+              fillColor: Colors.white,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide.none,
+              ),
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(vertical: 14),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pill(String text, {required Color bg, required Color fg, double size = 11}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+      child: Text(
+        text,
+        style: TextStyle(color: fg, fontSize: size, fontWeight: FontWeight.w700),
+      ),
+    );
+  }
+
+  Widget _card(BuildContext c, Map<String, dynamic> t) {
+    final created = DateTime.tryParse('${t['created_at']}');
+    final isNew = created != null && DateTime.now().difference(created).inDays < 7;
+    final fav = favs.value.contains(t['id'].toString());
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withAlpha(20),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () async {
+            await Navigator.push(
+              c,
+              MaterialPageRoute(builder: (_) => DetailPage(t: t, isAdmin: widget.isAdmin)),
+            );
+            _reload();
+          },
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    PreviewImage(path: t['preview_path'] as String),
+                    Positioned(
+                      left: 8,
+                      top: 8,
+                      child: _pill(
+                        (t['category'] ?? 'General') as String,
+                        bg: Colors.black.withAlpha(110),
+                        fg: Colors.white,
+                        size: 10,
+                      ),
+                    ),
+                    if (!widget.isAdmin)
+                      Positioned(
+                        right: 8,
+                        top: 8,
+                        child: GestureDetector(
+                          onTap: () => toggleFav(t['id']),
+                          child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withAlpha(235),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              fav ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                              size: 18,
+                              color: fav ? Colors.red : Colors.black54,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (isNew)
+                      Positioned(
+                        left: 8,
+                        bottom: 8,
+                        child: _pill('NEW', bg: const Color(0xFFFF8A00), fg: Colors.white, size: 10),
+                      ),
+                    Positioned(
+                      right: 8,
+                      bottom: 8,
+                      child: _pill(
+                        money(t['price'] as num),
+                        bg: kBrandA,
+                        fg: Colors.white,
+                        size: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        t['title'] as String,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                      ),
+                    ),
+                    if (!widget.isAdmin)
+                      AnimatedBuilder(
+                        animation: cart,
+                        builder: (cc, _) {
+                          final inCart = cart.has(t['id']);
+                          return GestureDetector(
+                            onTap: inCart
+                                ? null
+                                : () {
+                                    cart.add(t);
+                                    toast(cc, 'Added to cart');
+                                  },
+                            child: Container(
+                              margin: const EdgeInsets.only(left: 4),
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: kBrandA.withAlpha(inCart ? 40 : 25),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Icon(
+                                inCart ? Icons.check_rounded : Icons.add_shopping_cart_rounded,
+                                size: 18,
+                                color: kBrandA,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _chip(String c) {
+    final sel = _cat == c;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: GestureDetector(
+        onTap: () => setState(() => _cat = c),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            gradient: sel ? const LinearGradient(colors: [kBrandA, kBrandB]) : null,
+            color: sel ? null : Colors.white,
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withAlpha(sel ? 40 : 14),
+                blurRadius: 8,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Text(
+            c,
+            style: TextStyle(
+              color: sel ? Colors.white : const Color(0xFF3A3A55),
+              fontWeight: FontWeight.w700,
+              fontSize: 13,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AppLogo(size: 32),
-            SizedBox(width: 10),
-            Text('Template Store'),
-          ],
-        ),
-        actions: [
-          if (!widget.isAdmin)
-            AnimatedBuilder(
-              animation: cart,
-              builder: (c, _) => IconButton(
-                tooltip: 'Cart',
-                onPressed: () => Navigator.push(
-                  c,
-                  MaterialPageRoute(builder: (_) => const CartPage()),
-                ),
-                icon: Badge(
-                  isLabelVisible: cart.items.isNotEmpty,
-                  label: Text('${cart.items.length}'),
-                  child: const Icon(Icons.shopping_cart_outlined),
-                ),
-              ),
-            ),
-        ],
-      ),
       floatingActionButton: widget.isAdmin
           ? FloatingActionButton.extended(
               onPressed: () async {
@@ -785,158 +1323,113 @@ class _StorePageState extends State<StorePage> {
                 );
                 if (ok == true) _reload();
               },
-              icon: const Icon(Icons.add),
+              icon: const Icon(Icons.add_rounded),
               label: const Text('Add template'),
             )
           : null,
-      body: FutureBuilder<Rows>(
-        future: _f,
-        builder: (context, s) {
-          if (s.hasError) {
-            return ListView(children: [
-              Padding(padding: const EdgeInsets.all(24), child: Text('Could not load: ${s.error}')),
-            ]);
-          }
-          if (!s.hasData) return const Center(child: CircularProgressIndicator());
-          final all = s.data!;
-          final cats = <String>{
-            'All',
-            ...all.map((t) => (t['category'] ?? 'General') as String),
-          }.toList();
-          final items = _filter(all);
+      body: Column(
+        children: [
+          _header(context),
+          if (!widget.isAdmin) _banner(),
+          Expanded(
+            child: FutureBuilder<Rows>(
+              future: _f,
+              builder: (context, s) {
+                if (s.hasError) {
+                  return ListView(children: [
+                    Padding(padding: const EdgeInsets.all(24), child: Text('Could not load: ${s.error}')),
+                  ]);
+                }
+                if (!s.hasData) return const Center(child: CircularProgressIndicator());
+                final all = s.data!;
+                final cats = <String>{
+                  'All',
+                  if (!widget.isAdmin) 'Saved',
+                  ...all.map((t) => (t['category'] ?? 'General') as String),
+                }.toList();
+                final items = _filter(all);
 
-          return Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                child: TextField(
-                  controller: _search,
-                  onChanged: (v) => setState(() => _q = v),
-                  decoration: InputDecoration(
-                    hintText: 'Search templates',
-                    prefixIcon: const Icon(Icons.search),
-                    suffixIcon: _q.isEmpty
-                        ? null
-                        : IconButton(
-                            icon: const Icon(Icons.close),
-                            onPressed: () {
-                              _search.clear();
-                              setState(() => _q = '');
-                            },
-                          ),
-                    filled: true,
-                    fillColor: Colors.white,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(30),
-                      borderSide: BorderSide.none,
+                return Column(
+                  children: [
+                    SizedBox(
+                      height: 56,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+                        children: cats.map(_chip).toList(),
+                      ),
                     ),
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                  ),
-                ),
-              ),
-              SizedBox(
-                height: 48,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  children: cats
-                      .map(
-                        (c) => Padding(
-                          padding: const EdgeInsets.only(right: 8),
-                          child: ChoiceChip(
-                            label: Text(c),
-                            selected: _cat == c,
-                            onSelected: (_) => setState(() => _cat = c),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(18, 0, 18, 4),
+                      child: Row(
+                        children: [
+                          Text(
+                            _cat == 'All' ? 'All templates' : _cat,
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
                           ),
-                        ),
-                      )
-                      .toList(),
-                ),
-              ),
-              Expanded(
-                child: RefreshIndicator(
-                  onRefresh: () async {
-                    _reload();
-                    await _f;
-                  },
-                  child: items.isEmpty
-                      ? ListView(
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          children: const [
-                            Padding(
-                              padding: EdgeInsets.all(40),
-                              child: Center(child: Text('No templates found')),
+                          const Spacer(),
+                          Text(
+                            '${items.length} found',
+                            style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                          ),
+                          PopupMenuButton<String>(
+                            tooltip: 'Sort',
+                            icon: Icon(
+                              Icons.sort_rounded,
+                              color: _sort == 'new' ? Colors.grey.shade700 : kBrandA,
                             ),
-                          ],
-                        )
-                      : GridView.builder(
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          padding: const EdgeInsets.all(12),
-                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 2,
-                            mainAxisSpacing: 12,
-                            crossAxisSpacing: 12,
-                            childAspectRatio: 0.72,
+                            onSelected: (v) => setState(() => _sort = v),
+                            itemBuilder: (_) => const [
+                              PopupMenuItem(value: 'new', child: Text('Newest first')),
+                              PopupMenuItem(value: 'low', child: Text('Price: low to high')),
+                              PopupMenuItem(value: 'high', child: Text('Price: high to low')),
+                            ],
                           ),
-                          itemCount: items.length,
-                          itemBuilder: (c, i) {
-                            final t = items[i];
-                            return Card(
-                              elevation: 3,
-                              shadowColor: Colors.black26,
-                              color: Colors.white,
-                              surfaceTintColor: Colors.transparent,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(18),
-                              ),
-                              clipBehavior: Clip.antiAlias,
-                              child: InkWell(
-                                onTap: () async {
-                                  await Navigator.push(
-                                    c,
-                                    MaterialPageRoute(
-                                      builder: (_) => DetailPage(t: t, isAdmin: widget.isAdmin),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: RefreshIndicator(
+                        onRefresh: () async {
+                          _reload();
+                          await _f;
+                        },
+                        child: items.isEmpty
+                            ? ListView(
+                                physics: const AlwaysScrollableScrollPhysics(),
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.all(48),
+                                    child: Column(
+                                      children: [
+                                        Icon(Icons.search_off_rounded, size: 56, color: Colors.grey.shade400),
+                                        const SizedBox(height: 10),
+                                        Text(_cat == 'Saved' ? 'No saved templates yet' : 'No templates found'),
+                                      ],
                                     ),
-                                  );
-                                  _reload();
-                                },
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Expanded(child: PreviewImage(path: t['preview_path'] as String)),
-                                    Padding(
-                                      padding: const EdgeInsets.all(8),
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            t['title'] as String,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(fontWeight: FontWeight.w600),
-                                          ),
-                                          Text(
-                                            money(t['price'] as num),
-                                            style: TextStyle(
-                                              color: Theme.of(context).colorScheme.primary,
-                                              fontWeight: FontWeight.w800,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
+                                  ),
+                                ],
+                              )
+                            : GridView.builder(
+                                physics: const AlwaysScrollableScrollPhysics(),
+                                padding: const EdgeInsets.fromLTRB(16, 8, 16, 90),
+                                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: 2,
+                                  mainAxisSpacing: 14,
+                                  crossAxisSpacing: 14,
+                                  childAspectRatio: 0.74,
                                 ),
+                                itemCount: items.length,
+                                itemBuilder: (c, i) => _card(c, items[i]),
                               ),
-                            );
-                          },
-                        ),
-                ),
-              ),
-            ],
-          );
-        },
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1114,35 +1607,81 @@ class _DetailPageState extends State<DetailPage> {
     }
 
     return Scaffold(
-      appBar: AppBar(title: Text(t['title'] as String)),
+      appBar: AppBar(
+        title: Text(t['title'] as String),
+        actions: [
+          if (!widget.isAdmin)
+            ValueListenableBuilder<Set<String>>(
+              valueListenable: favs,
+              builder: (c, f, _) {
+                final on = f.contains(t['id'].toString());
+                return IconButton(
+                  tooltip: 'Save',
+                  onPressed: () => toggleFav(t['id']),
+                  icon: Icon(
+                    on ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                    color: on ? Colors.red : null,
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(12),
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(24),
+                  blurRadius: 18,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            clipBehavior: Clip.antiAlias,
             child: AspectRatio(
               aspectRatio: 1,
               child: PreviewImage(path: t['preview_path'] as String, fit: BoxFit.contain),
             ),
           ),
-          const SizedBox(height: 16),
-          Text(t['title'] as String, style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 18),
+          Text(
+            t['title'] as String,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+          ),
           const SizedBox(height: 4),
           Row(
             children: [
               Text(
                 money(price),
-                style: Theme.of(context)
-                    .textTheme
-                    .titleMedium
-                    ?.copyWith(color: Theme.of(context).colorScheme.primary),
+                style: const TextStyle(
+                  color: kBrandA,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                ),
               ),
               const SizedBox(width: 12),
               Chip(label: Text((t['category'] ?? 'General') as String)),
             ],
           ),
           const SizedBox(height: 8),
-          Text((t['description'] ?? '') as String),
+          if (((t['description'] ?? '') as String).trim().isNotEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                (t['description'] ?? '') as String,
+                style: const TextStyle(height: 1.4),
+              ),
+            ),
           const SizedBox(height: 20),
           action,
         ],
@@ -1647,6 +2186,61 @@ class _OrdersPageState extends State<OrdersPage> {
     });
   }
 
+  // 3-step progress: Payment sent -> Verifying -> Completed / Rejected
+  Widget _tracker(String status) {
+    final rejected = status == 'rejected';
+    final done = status == 'approved' ? 3 : (rejected ? 2 : 1);
+    final labels = ['Payment sent', 'Verifying', rejected ? 'Rejected' : 'Completed'];
+    Color colFor(int i) {
+      if (rejected && i == 2) return Colors.red;
+      if (i < done) return Colors.green;
+      if (i == done) return Colors.orange;
+      return Colors.grey.shade400;
+    }
+
+    IconData iconFor(int i) {
+      if (rejected && i == 2) return Icons.close_rounded;
+      if (i < done) return Icons.check_rounded;
+      if (i == done) return Icons.hourglass_top_rounded;
+      return Icons.circle_outlined;
+    }
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (int i = 0; i < 3; i++) ...[
+          if (i > 0)
+            Expanded(
+              child: Container(
+                margin: const EdgeInsets.only(top: 11),
+                height: 2,
+                color: (i < done || (rejected && i == 2)) ? colFor(i) : Colors.grey.shade300,
+              ),
+            ),
+          SizedBox(
+            width: 70,
+            child: Column(
+              children: [
+                Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(color: colFor(i), shape: BoxShape.circle),
+                  child: Icon(iconFor(i), size: 15, color: Colors.white),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  labels[i],
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w600, color: colFor(i)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
   Widget _tile(String label, String key, int n, Color color) {
     final sel = _filter == key;
     return Expanded(
@@ -1712,7 +2306,10 @@ class _OrdersPageState extends State<OrdersPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.isAdmin ? 'All Orders' : 'My Purchases')),
+      appBar: AppBar(
+        leading: menuButton(context),
+        title: Text(widget.isAdmin ? 'All Orders' : 'My Orders'),
+      ),
       body: RefreshIndicator(
         onRefresh: () async {
           _reload();
@@ -1811,8 +2408,13 @@ class _OrdersPageState extends State<OrdersPage> {
                   if (tt != null) total += tt['price'] as num;
                 }
                 return Card(
+                  elevation: 2,
+                  shadowColor: Colors.black26,
+                  color: Colors.white,
+                  surfaceTintColor: Colors.transparent,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
                   child: Padding(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(14),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -1828,6 +2430,10 @@ class _OrdersPageState extends State<OrdersPage> {
                             ),
                             statusChip(status),
                           ],
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12, bottom: 6),
+                          child: _tracker(status),
                         ),
                         if (multi)
                           for (final r in g)
@@ -1996,7 +2602,10 @@ class _SupportPageState extends State<SupportPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.isAdmin ? 'Support Inbox' : 'Support')),
+      appBar: AppBar(
+        leading: menuButton(context),
+        title: Text(widget.isAdmin ? 'Support Inbox' : 'Support'),
+      ),
       floatingActionButton: widget.isAdmin
           ? null
           : FloatingActionButton.extended(
@@ -2419,6 +3028,10 @@ class _ProfilePageState extends State<ProfilePage> {
 
           if (isAdmin) ...[
             const SizedBox(height: 18),
+            const EarningsChart(),
+          ],
+          if (isAdmin) ...[
+            const SizedBox(height: 18),
             FutureBuilder<Map<String, int>>(
               future: _stats(),
               builder: (context, s) {
@@ -2477,6 +3090,133 @@ class _ProfilePageState extends State<ProfilePage> {
             label: const Text('Logout'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+
+// Admin: earnings from completed orders over the last 7 days (by order date)
+class EarningsChart extends StatelessWidget {
+  const EarningsChart({super.key});
+
+  Future<List<num>> _load() async {
+    final r = asRows(
+      await db.from('orders').select('created_at, status, templates(price)').eq('status', 'approved'),
+    );
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final sums = List<num>.filled(7, 0);
+    for (final o in r) {
+      final d = DateTime.tryParse('${o['created_at']}')?.toLocal();
+      final t = o['templates'] as Map<String, dynamic>?;
+      if (d == null || t == null) continue;
+      final day = DateTime(d.year, d.month, d.day);
+      final diff = today.difference(day).inDays;
+      if (diff >= 0 && diff < 7) sums[6 - diff] += t['price'] as num;
+    }
+    return sums;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withAlpha(14), blurRadius: 16, offset: const Offset(0, 6)),
+        ],
+      ),
+      child: FutureBuilder<List<num>>(
+        future: _load(),
+        builder: (c, s) {
+          if (s.hasError) return const Text('Could not load earnings');
+          if (!s.hasData) {
+            return const SizedBox(height: 120, child: Center(child: CircularProgressIndicator()));
+          }
+          final v = s.data!;
+          num total = 0;
+          num maxV = 0;
+          for (final x in v) {
+            total += x;
+            if (x > maxV) maxV = x;
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Earnings - last 7 days',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  Text(
+                    money(total),
+                    style: const TextStyle(
+                      color: Colors.green,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Completed orders, by order date',
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                height: 130,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    for (int i = 0; i < 7; i++)
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            if (v[i] > 0)
+                              Text(
+                                money(v[i]),
+                                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
+                              ),
+                            const SizedBox(height: 3),
+                            Container(
+                              height: maxV == 0 ? 4 : (v[i] / maxV * 80).clamp(4.0, 80.0).toDouble(),
+                              margin: const EdgeInsets.symmetric(horizontal: 6),
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: v[i] > 0
+                                      ? const [kBrandB, kBrandA]
+                                      : [Colors.grey.shade300, Colors.grey.shade300],
+                                ),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              names[today.subtract(Duration(days: 6 - i)).weekday - 1],
+                              style: TextStyle(fontSize: 10.5, color: Colors.grey.shade700),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
