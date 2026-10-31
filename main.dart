@@ -1632,6 +1632,7 @@ class DetailPage extends StatefulWidget {
 class _DetailPageState extends State<DetailPage> {
   late Map<String, dynamic> _t = widget.t;
   String? _status;
+  String? _remarks;
   bool _loading = true;
 
   @override
@@ -1644,13 +1645,14 @@ class _DetailPageState extends State<DetailPage> {
     try {
       final r = await db
           .from('orders')
-          .select('status')
+          .select('status, remarks')
           .eq('user_id', myId!)
           .eq('template_id', _t['id'])
           .order('created_at', ascending: false)
           .limit(1);
       final rows = asRows(r);
       _status = rows.isEmpty ? null : rows.first['status'] as String;
+      _remarks = rows.isEmpty ? null : rows.first['remarks']?.toString();
     } catch (_) {}
     if (mounted) setState(() => _loading = false);
   }
@@ -1745,9 +1747,13 @@ class _DetailPageState extends State<DetailPage> {
     } else {
       action = Column(children: [
         if (_status == 'rejected')
-          const Padding(
-            padding: EdgeInsets.only(bottom: 8),
-            child: Text('Your last payment was rejected. You can try again.'),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              (_remarks ?? '').trim().isEmpty
+                  ? 'Your last payment was rejected. You can try again.'
+                  : 'Your last payment was rejected.\nReason: ${_remarks!.trim()}\nYou can try again.',
+            ),
           ),
         SizedBox(
           width: double.infinity,
@@ -2475,13 +2481,69 @@ class _OrdersPageState extends State<OrdersPage> {
     );
   }
 
-  Future<void> _setStatus(Map<String, dynamic> o, String status) async {
+  Future<void> _reject(Map<String, dynamic> o) async {
+    final c = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('Reject payment'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Remarks (the customer will see this reason)'),
+              const SizedBox(height: 8),
+              TextField(
+                controller: c,
+                maxLines: 3,
+                autofocus: true,
+                onChanged: (_) => setD(() {}),
+                decoration: const InputDecoration(
+                  hintText: 'Why is this payment rejected?',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 0,
+                children: [
+                  for (final q in const ['Wrong UTR', 'Amount mismatch', 'Payment not received'])
+                    ActionChip(
+                      label: Text(q, style: const TextStyle(fontSize: 12)),
+                      onPressed: () {
+                        c.text = q;
+                        c.selection = TextSelection.collapsed(offset: q.length);
+                        setD(() {});
+                      },
+                    ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: c.text.trim().isEmpty ? null : () => Navigator.pop(ctx, c.text.trim()),
+              child: const Text('Reject'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (reason == null || reason.isEmpty) return;
+    await _setStatus(o, 'rejected', remarks: reason);
+  }
+
+  Future<void> _setStatus(Map<String, dynamic> o, String status, {String? remarks}) async {
     try {
       final g = o['payment_group'];
+      final patch = <String, dynamic>{'status': status, 'remarks': status == 'rejected' ? remarks : null};
       if (g != null) {
-        await db.from('orders').update({'status': status}).eq('payment_group', g);
+        await db.from('orders').update(patch).eq('payment_group', g);
       } else {
-        await db.from('orders').update({'status': status}).eq('id', o['id']);
+        await db.from('orders').update(patch).eq('id', o['id']);
       }
       _reload();
     } catch (e) {
@@ -2668,13 +2730,27 @@ class _OrdersPageState extends State<OrdersPage> {
                         if (_when(o['created_at']).isNotEmpty)
                           _infoRow(Icons.schedule_rounded, _when(o['created_at'])),
                         Text('UTR: ${o['utr'] ?? ''}'),
+                        if (status == 'rejected' && (o['remarks'] ?? '').toString().trim().isNotEmpty)
+                          Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(top: 8),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Colors.red.shade50,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              'Reason: ${o['remarks'].toString().trim()}',
+                              style: TextStyle(color: Colors.red.shade800),
+                            ),
+                          ),
                         const SizedBox(height: 8),
                         if (widget.isAdmin && status == 'pending')
                           Row(
                             mainAxisAlignment: MainAxisAlignment.end,
                             children: [
                               TextButton(
-                                onPressed: () => _setStatus(o, 'rejected'),
+                                onPressed: () => _reject(o),
                                 child: const Text('Reject'),
                               ),
                               const SizedBox(width: 8),
