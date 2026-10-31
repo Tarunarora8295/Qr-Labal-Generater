@@ -167,6 +167,20 @@ Future<Uint8List> makePreview(Uint8List bytes) async {
   return data!.buffer.asUint8List();
 }
 
+// Re-encodes the image so the old photo date (EXIF) is dropped.
+// The gallery then shows the download at today's date, at the top.
+Future<Uint8List> freshImage(Uint8List bytes) async {
+  try {
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    final data = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+    if (data == null) return bytes;
+    return data.buffer.asUint8List();
+  } catch (_) {
+    return bytes;
+  }
+}
+
 // Downloads the original image and saves it straight into the phone gallery.
 // (On web, where a gallery does not exist, it falls back to opening the link.)
 Future<void> openOriginal(BuildContext context, String path) async {
@@ -190,8 +204,11 @@ Future<void> openOriginal(BuildContext context, String path) async {
       }
     }
 
-    final base = path.contains('.') ? path.substring(0, path.lastIndexOf('.')) : path;
-    await Gal.putImageBytes(bytes, album: 'Template Store', name: base);
+    final fresh = await freshImage(bytes);
+    final now = DateTime.now();
+    String two(int n) => n.toString().padLeft(2, '0');
+    final name = 'Template_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}${two(now.second)}';
+    await Gal.putImageBytes(fresh, album: 'Template Store', name: name);
     if (context.mounted) toast(context, 'Saved to your gallery');
   } catch (e) {
     if (context.mounted) toast(context, 'Download error: $e');
