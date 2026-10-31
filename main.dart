@@ -3091,7 +3091,9 @@ class _ProfilePageState extends State<ProfilePage> {
   void initState() {
     super.initState();
     _name.text = (_meta['full_name'] ?? '').toString();
-    _phone.text = (_meta['phone'] ?? '').toString();
+    var d = (_meta['phone'] ?? '').toString().replaceAll(RegExp(r'\D'), '');
+    if (d.length > 10) d = d.substring(d.length - 10);
+    _phone.text = d;
   }
 
   @override
@@ -3116,15 +3118,16 @@ class _ProfilePageState extends State<ProfilePage> {
 
   Future<void> _save() async {
     final name = _name.text.trim();
-    final phone = _phone.text.replaceAll(' ', '').trim();
+    final digits = _phone.text.trim();
     if (name.isEmpty) {
       toast(context, 'Please enter your name');
       return;
     }
-    if (phone.isNotEmpty && !RegExp(r'^\+?\d{10,13}$').hasMatch(phone)) {
-      toast(context, 'Enter a valid phone number (10 digits)');
+    if (digits.isNotEmpty && !RegExp(r'^[6-9]\d{9}$').hasMatch(digits)) {
+      toast(context, 'Enter a valid 10 digit mobile number');
       return;
     }
+    final phone = digits.isEmpty ? '' : '+91$digits';
     setState(() => _saving = true);
     try {
       await db.auth.updateUser(UserAttributes(data: {'full_name': name, 'phone': phone}));
@@ -3264,8 +3267,17 @@ class _ProfilePageState extends State<ProfilePage> {
                 TextField(
                   controller: _phone,
                   keyboardType: TextInputType.phone,
-                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9+ ]'))],
-                  decoration: fieldDeco('Phone number', Icons.phone_outlined, hint: '98765 43210'),
+                  maxLength: 10,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(10),
+                  ],
+                  decoration: fieldDeco('Phone number', Icons.phone_outlined, hint: '9876543210').copyWith(
+                    prefixText: '+91  ',
+                    prefixStyle: const TextStyle(fontWeight: FontWeight.w700),
+                    floatingLabelBehavior: FloatingLabelBehavior.always,
+                    counterText: '',
+                  ),
                 ),
                 const SizedBox(height: 12),
                 TextFormField(
