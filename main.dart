@@ -2912,7 +2912,17 @@ class _SupportPageState extends State<SupportPage> {
               const SizedBox(height: 8),
               TextField(controller: size, decoration: const InputDecoration(labelText: 'Size (optional)')),
               const SizedBox(height: 8),
-              TextField(controller: serial, decoration: const InputDecoration(labelText: 'Serial number')),
+              TextField(
+                controller: serial,
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
+                minLines: 2,
+                maxLines: 8,
+                decoration: const InputDecoration(
+                  labelText: 'Serial number',
+                  alignLabelWithHint: true,
+                ),
+              ),
             ],
           ),
         ),
@@ -2998,7 +3008,7 @@ class _SupportPageState extends State<SupportPage> {
                 final tsn = (t['serial_no'] ?? '').toString().trim();
                 final info = [
                   if (tsz.isNotEmpty) 'Size: $tsz',
-                  if (tsn.isNotEmpty) 'Serial: $tsn',
+                  if (tsn.isNotEmpty) 'Serial: ${tsn.replaceAll(RegExp(r'\s*\n\s*'), ', ')}',
                 ].join('  |  ');
                 final sub = [
                   if (widget.isAdmin) '${t['user_email'] ?? ''}',
