@@ -27,6 +27,11 @@ jobs:
         run: |
           flutter create --org com.templatestore --project-name template_store --platforms android .
           flutter pub add supabase_flutter image_picker url_launcher qr_flutter gal http package_info_plus file_picker:^8.1.2
+          # file_picker 8.x is compiled against Android 34 but the other plugins need 36
+          for f in $(find "${PUB_CACHE:-$HOME/.pub-cache}" -path '*file_picker-*/android/build.gradle' 2>/dev/null); do
+            sed -i -E 's/compileSdk(Version)?[[:space:]]*=?[[:space:]]*[0-9]+/compileSdk = 36/' "$f"
+            grep -n "compileSdk" "$f" || true
+          done
           cp -f main.dart config.dart lib/
           rm -rf test
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n    <application#' android/app/src/main/AndroidManifest.xml
@@ -86,4 +91,3 @@ jobs:
           tag_name: v${{ github.run_number }}
           name: Template Store v${{ github.run_number }}
           files: build/app/outputs/flutter-apk/app-release.apk
-          
