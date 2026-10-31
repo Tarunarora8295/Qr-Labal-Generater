@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' show Random;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -7,7 +8,9 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -19,6 +22,160 @@ SupabaseClient get db => Supabase.instance.client;
 typedef Rows = List<Map<String, dynamic>>;
 
 Rows asRows(dynamic r) => List<Map<String, dynamic>>.from(r as List);
+
+// ---------------------------------------------------------------- UPDATES + TELEGRAM ALERTS
+
+const kRepo = 'Tarunarora8295/Qr-Labal-Generater'; // GitHub repo that holds the APK releases
+const kTgBot = 'TamplateStoresupport_bot'; // Telegram bot that sends the user alerts
+
+// Looks on GitHub for a newer release. Tapping "Update" downloads the new APK;
+// installing it replaces the old app and keeps all data (needs the fixed signing key).
+Future<void> checkForUpdate(BuildContext context, {bool manual = false}) async {
+  if (kIsWeb) return;
+  try {
+    final info = await PackageInfo.fromPlatform();
+    final current = int.tryParse(info.buildNumber) ?? 0;
+    final res = await http
+        .get(
+          Uri.parse('https://api.github.com/repos/$kRepo/releases?per_page=10'),
+          headers: const {'Accept': 'application/vnd.github+json'},
+        )
+        .timeout(const Duration(seconds: 12));
+    if (res.statusCode != 200) throw Exception('GitHub ${res.statusCode}');
+    var best = 0;
+    String? apk;
+    for (final r in jsonDecode(res.body) as List) {
+      if (r['draft'] == true || r['prerelease'] == true) continue;
+      final n = int.tryParse('${r['tag_name'] ?? ''}'.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+      if (n <= best) continue;
+      for (final a in (r['assets'] as List? ?? const [])) {
+        if (a['name'] == 'app-release.apk') {
+          best = n;
+          apk = '${a['browser_download_url']}';
+        }
+      }
+    }
+    if (!context.mounted) return;
+    if (apk != null && best > current) {
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Update available'),
+          content: Text(
+            'A new version (v$best) is ready. You are on v$current.\n\n'
+            'Tap Update, then open the downloaded file and tap Install. '
+            'Your account and orders stay safe.',
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Later')),
+            FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Update')),
+          ],
+        ),
+      );
+      if (go == true) {
+        await launchUrl(Uri.parse(apk), mode: LaunchMode.externalApplication);
+      }
+    } else if (manual) {
+      toast(context, 'You are on the latest version (v$current)');
+    }
+  } catch (_) {
+    if (manual && context.mounted) toast(context, 'Could not check for updates');
+  }
+}
+
+bool _tgOffered = false;
+
+// Asks (once per app session) whether the user wants Telegram alerts, if not linked yet
+Future<void> offerTelegramAlerts(BuildContext context) async {
+  if (_tgOffered || kIsWeb) return;
+  try {
+    final r = await db.from('profiles').select('tg_code, tg_chat_id').eq('id', myId!).maybeSingle();
+    final code = r?['tg_code']?.toString();
+    if (code == null || code.isEmpty || r?['tg_chat_id'] != null) return;
+    _tgOffered = true;
+    if (!context.mounted) return;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Get instant alerts?'),
+        content: const Text(
+          'Get a Telegram message when your payment is approved, when support replies, '
+          'and when new templates arrive.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Later')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Enable')),
+        ],
+      ),
+    );
+    if (go == true) {
+      await launchUrl(Uri.parse('https://t.me/$kTgBot?start=$code'), mode: LaunchMode.externalApplication);
+    }
+  } catch (_) {}
+}
+
+// Drawer item: links the user's account to the Telegram bot (hidden if alerts are not set up)
+class TelegramTile extends StatefulWidget {
+  const TelegramTile({super.key});
+
+  @override
+  State<TelegramTile> createState() => _TelegramTileState();
+}
+
+class _TelegramTileState extends State<TelegramTile> with WidgetsBindingObserver {
+  String? _code;
+  bool _linked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final r = await db.from('profiles').select('tg_code, tg_chat_id').eq('id', myId!).maybeSingle();
+      if (!mounted) return;
+      setState(() {
+        _code = r?['tg_code']?.toString();
+        _linked = r?['tg_chat_id'] != null;
+      });
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final code = _code;
+    if (code == null || code.isEmpty) return const SizedBox.shrink();
+    return ListTile(
+      leading: Icon(
+        _linked ? Icons.notifications_active_rounded : Icons.notifications_none_rounded,
+        color: kBrandA,
+      ),
+      title: Text(
+        _linked ? 'Telegram alerts: ON' : 'Enable Telegram alerts',
+        style: const TextStyle(fontWeight: FontWeight.w700),
+      ),
+      subtitle: Text(_linked ? 'Send /stop to the bot to turn off' : 'Payments, support replies, new templates'),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 22, vertical: 2),
+      onTap: _linked
+          ? null
+          : () => launchUrl(Uri.parse('https://t.me/$kTgBot?start=$code'), mode: LaunchMode.externalApplication),
+    );
+  }
+}
 
 // ---------------------------------------------------------------- CART
 
@@ -704,6 +861,11 @@ class _HomeShellState extends State<HomeShell> {
     super.initState();
     shellTab.value = 0;
     loadFavs();
+    if (!kIsWeb) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) checkForUpdate(context);
+      });
+    }
     if (widget.isAdmin) {
       _poll();
       _timer = Timer.periodic(const Duration(seconds: 30), (_) => _poll());
@@ -877,6 +1039,12 @@ class AppDrawer extends StatelessWidget {
                 ),
               );
             }),
+          if (!isAdmin) const TelegramTile(),
+          item(Icons.system_update_rounded, 'Check for updates', () {
+            final ctx = shellKey.currentContext ?? context;
+            Navigator.of(context).pop();
+            checkForUpdate(ctx, manual: true);
+          }),
           const Spacer(),
           const Divider(height: 1),
           item(
@@ -1779,7 +1947,8 @@ class _BuyPageState extends State<BuyPage> {
       }
       if (mounted) {
         toast(context, 'Request sent. Download unlocks after the master approves.');
-        Navigator.pop(context, true);
+        await offerTelegramAlerts(context);
+        if (mounted) Navigator.pop(context, true);
       }
     } on PostgrestException catch (e) {
       if (mounted) {
@@ -2611,6 +2780,7 @@ class _SupportPageState extends State<SupportPage> {
         'body': m,
       });
       _reload();
+      if (mounted) await offerTelegramAlerts(context);
     } catch (e) {
       if (mounted) toast(context, 'Error: $e');
     }
