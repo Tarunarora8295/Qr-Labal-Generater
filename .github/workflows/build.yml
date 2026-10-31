@@ -23,21 +23,67 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter project banao aur files lagao
+      - name: Create Flutter project and add files
         run: |
           flutter create --org com.templatestore --project-name template_store --platforms android .
-          flutter pub add supabase_flutter image_picker url_launcher qr_flutter gal
+          flutter pub add supabase_flutter image_picker url_launcher qr_flutter gal http package_info_plus
           cp -f main.dart config.dart lib/
           rm -rf test
-          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's/android:label="[^"]*"/android:label="Template Store"/' android/app/src/main/AndroidManifest.xml
 
-      - name: APK build
-        run: flutter build apk --release
+      # A fixed signing key lets a new APK install OVER the old app (no uninstall needed).
+      # The key lives in the repo secret SIGNING_BUNDLE. Without it the build still works,
+      # but it uses a temporary key and cannot update an installed app.
+      - name: Apply fixed signing key
+        env:
+          SIGNING_BUNDLE: ${{ secrets.SIGNING_BUNDLE }}
+        run: |
+          if [ -z "$SIGNING_BUNDLE" ]; then
+            echo "::warning::SIGNING_BUNDLE secret is missing - building with a temporary key (app will NOT update in place)"
+            exit 0
+          fi
+          echo "$SIGNING_BUNDLE" | base64 -d | tar xz -C android
+          python3 - <<'PY' || echo "::warning::Could not apply the signing key - building with a temporary key"
+          import pathlib
+          p = pathlib.Path("android/app/build.gradle.kts")
+          s = p.read_text()
+          load = """
+          val keystoreProperties = Properties()
+          val keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+          }
 
-      - name: Release me APK daalo
+          """
+          signing = """    signingConfigs {
+                  create("release") {
+                      keyAlias = keystoreProperties["keyAlias"] as String
+                      keyPassword = keystoreProperties["keyPassword"] as String
+                      storeFile = file(keystoreProperties["storeFile"] as String)
+                      storePassword = keystoreProperties["storePassword"] as String
+                  }
+              }
+
+          """
+          assert "\nandroid {" in s, "android block not found"
+          assert "    buildTypes {" in s, "buildTypes block not found"
+          assert 'signingConfig = signingConfigs.getByName("debug")' in s, "debug signing line not found"
+          s = "import java.util.Properties\nimport java.io.FileInputStream\n\n" + s
+          s = s.replace("\nandroid {", "\n" + load + "android {", 1)
+          s = s.replace("    buildTypes {", signing + "    buildTypes {", 1)
+          s = s.replace('signingConfig = signingConfigs.getByName("debug")', 'signingConfig = signingConfigs.getByName("release")', 1)
+          p.write_text(s)
+          print("Signing key applied")
+          PY
+
+      - name: Build APK
+        run: flutter build apk --release --build-number=${{ github.run_number }}
+
+      - name: Publish APK as a release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
           name: Template Store v${{ github.run_number }}
           files: build/app/outputs/flutter-apk/app-release.apk
+          
