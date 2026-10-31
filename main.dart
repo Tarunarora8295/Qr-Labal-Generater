@@ -3,8 +3,10 @@ import 'dart:math' show Random;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:gal/gal.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -136,11 +138,32 @@ Future<Uint8List> makePreview(Uint8List bytes) async {
   return data!.buffer.asUint8List();
 }
 
+// Downloads the original image and saves it straight into the phone gallery.
+// (On web, where a gallery does not exist, it falls back to opening the link.)
 Future<void> openOriginal(BuildContext context, String path) async {
   try {
-    final url = await db.storage.from('originals').createSignedUrl(path, 3600);
-    final ok = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-    if (!ok && context.mounted) toast(context, 'Could not open the link');
+    if (kIsWeb) {
+      final url = await db.storage.from('originals').createSignedUrl(path, 3600);
+      final ok = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      if (!ok && context.mounted) toast(context, 'Could not open the link');
+      return;
+    }
+
+    if (context.mounted) toast(context, 'Downloading...');
+    final bytes = await db.storage.from('originals').download(path);
+
+    final hasAccess = await Gal.hasAccess(toAlbum: true);
+    if (!hasAccess) {
+      final granted = await Gal.requestAccess(toAlbum: true);
+      if (!granted) {
+        if (context.mounted) toast(context, 'Gallery permission is needed to save the image');
+        return;
+      }
+    }
+
+    final base = path.contains('.') ? path.substring(0, path.lastIndexOf('.')) : path;
+    await Gal.putImageBytes(bytes, album: 'Template Store', name: base);
+    if (context.mounted) toast(context, 'Saved to your gallery');
   } catch (e) {
     if (context.mounted) toast(context, 'Download error: $e');
   }
@@ -929,6 +952,7 @@ class DetailPage extends StatefulWidget {
 }
 
 class _DetailPageState extends State<DetailPage> {
+  late Map<String, dynamic> _t = widget.t;
   String? _status;
   bool _loading = true;
 
@@ -944,13 +968,24 @@ class _DetailPageState extends State<DetailPage> {
           .from('orders')
           .select('status')
           .eq('user_id', myId!)
-          .eq('template_id', widget.t['id'])
+          .eq('template_id', _t['id'])
           .order('created_at', ascending: false)
           .limit(1);
       final rows = asRows(r);
       _status = rows.isEmpty ? null : rows.first['status'] as String;
     } catch (_) {}
     if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _edit() async {
+    final updated = await Navigator.push<dynamic>(
+      context,
+      MaterialPageRoute(builder: (_) => AddTemplatePage(existing: _t)),
+    );
+    if (updated is Map<String, dynamic> && mounted) {
+      setState(() => _t = updated);
+      toast(context, 'Template updated');
+    }
   }
 
   Future<void> _delete() async {
@@ -967,9 +1002,9 @@ class _DetailPageState extends State<DetailPage> {
     );
     if (ok != true) return;
     try {
-      await db.storage.from('originals').remove([widget.t['file_path'] as String]);
-      await db.storage.from('previews').remove([widget.t['preview_path'] as String]);
-      await db.from('templates').delete().eq('id', widget.t['id']);
+      await db.storage.from('originals').remove([_t['file_path'] as String]);
+      await db.storage.from('previews').remove([_t['preview_path'] as String]);
+      await db.from('templates').delete().eq('id', _t['id']);
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) toast(context, 'Error: $e');
@@ -978,7 +1013,7 @@ class _DetailPageState extends State<DetailPage> {
 
   @override
   Widget build(BuildContext context) {
-    final t = widget.t;
+    final t = _t;
     final price = t['price'] as num;
     Widget action;
 
@@ -992,6 +1027,15 @@ class _DetailPageState extends State<DetailPage> {
             onPressed: () => openOriginal(context, t['file_path'] as String),
             icon: const Icon(Icons.download),
             label: const Text('Download original'),
+          ),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.tonalIcon(
+            onPressed: _edit,
+            icon: const Icon(Icons.edit_outlined),
+            label: const Text('Edit template'),
           ),
         ),
         const SizedBox(height: 8),
@@ -1362,7 +1406,8 @@ class CartPage extends StatelessWidget {
 }
 
 class AddTemplatePage extends StatefulWidget {
-  const AddTemplatePage({super.key});
+  final Map<String, dynamic>? existing; // when set, the page edits this template
+  const AddTemplatePage({super.key, this.existing});
 
   @override
   State<AddTemplatePage> createState() => _AddTemplatePageState();
@@ -1378,10 +1423,29 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
   Uint8List? _bytes;
   bool _busy = false;
 
+  bool get _edit => widget.existing != null;
+
   @override
   void initState() {
     super.initState();
+    final e = widget.existing;
+    if (e != null) {
+      _title.text = (e['title'] ?? '').toString();
+      final pr = e['price'];
+      _price.text = pr is num && pr == pr.truncate() ? pr.toInt().toString() : '${pr ?? ''}';
+      _cat.text = (e['category'] ?? 'General').toString();
+      _desc.text = (e['description'] ?? '').toString();
+    }
     _loadCats();
+  }
+
+  @override
+  void dispose() {
+    _title.dispose();
+    _price.dispose();
+    _desc.dispose();
+    _cat.dispose();
+    super.dispose();
   }
 
   Future<void> _loadCats() async {
@@ -1409,42 +1473,65 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
   Future<void> _save() async {
     final title = _title.text.trim();
     final price = num.tryParse(_price.text.trim());
-    if (_bytes == null || title.isEmpty || price == null || price < 0) {
-      toast(context, 'Please choose an image, title and a valid price');
+    final needImage = !_edit;
+    if ((needImage && _bytes == null) || title.isEmpty || price == null || price < 0) {
+      toast(
+        context,
+        _edit ? 'Please enter a title and a valid price' : 'Please choose an image, title and a valid price',
+      );
       return;
     }
     setState(() => _busy = true);
     try {
-      final name = _file!.name;
-      final ext = name.contains('.') ? name.split('.').last.toLowerCase() : 'jpg';
-      final stamp = DateTime.now().millisecondsSinceEpoch;
-      final filePath = 'orig_$stamp.$ext';
-      final previewPath = 'prev_$stamp.png';
-      final ct = ext == 'png'
-          ? 'image/png'
-          : ext == 'webp'
-              ? 'image/webp'
-              : 'image/jpeg';
-
-      final preview = await makePreview(_bytes!);
-      await db.storage
-          .from('originals')
-          .uploadBinary(filePath, _bytes!, fileOptions: FileOptions(contentType: ct));
-      await db.storage
-          .from('previews')
-          .uploadBinary(previewPath, preview, fileOptions: const FileOptions(contentType: 'image/png'));
       final cat = _cat.text.trim().isEmpty ? 'General' : _cat.text.trim();
-      await db.from('templates').insert({
+      final data = <String, dynamic>{
         'title': title,
         'description': _desc.text.trim(),
         'price': price,
         'category': cat,
-        'file_path': filePath,
-        'preview_path': previewPath,
-      });
-      if (mounted) {
-        toast(context, 'Template added');
-        Navigator.pop(context, true);
+      };
+
+      // upload new image only when one was chosen
+      if (_bytes != null) {
+        final name = _file!.name;
+        final ext = name.contains('.') ? name.split('.').last.toLowerCase() : 'jpg';
+        final stamp = DateTime.now().millisecondsSinceEpoch;
+        final filePath = 'orig_$stamp.$ext';
+        final previewPath = 'prev_$stamp.png';
+        final ct = ext == 'png'
+            ? 'image/png'
+            : ext == 'webp'
+                ? 'image/webp'
+                : 'image/jpeg';
+
+        final preview = await makePreview(_bytes!);
+        await db.storage
+            .from('originals')
+            .uploadBinary(filePath, _bytes!, fileOptions: FileOptions(contentType: ct));
+        await db.storage
+            .from('previews')
+            .uploadBinary(previewPath, preview, fileOptions: const FileOptions(contentType: 'image/png'));
+        data['file_path'] = filePath;
+        data['preview_path'] = previewPath;
+      }
+
+      if (_edit) {
+        final old = widget.existing!;
+        final row = await db.from('templates').update(data).eq('id', old['id']).select().single();
+        if (_bytes != null) {
+          // remove the old image files; ignore errors, the update already succeeded
+          try {
+            await db.storage.from('originals').remove([old['file_path'] as String]);
+            await db.storage.from('previews').remove([old['preview_path'] as String]);
+          } catch (_) {}
+        }
+        if (mounted) Navigator.pop(context, Map<String, dynamic>.from(row));
+      } else {
+        await db.from('templates').insert(data);
+        if (mounted) {
+          toast(context, 'Template added');
+          Navigator.pop(context, true);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1456,42 +1543,55 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
 
   @override
   Widget build(BuildContext context) {
+    final old = widget.existing;
     return Scaffold(
-      appBar: AppBar(title: const Text('New template')),
+      appBar: AppBar(title: Text(_edit ? 'Edit template' : 'New template')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          if (_bytes != null)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Image.memory(_bytes!, height: 220, fit: BoxFit.contain),
-            ),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: _bytes != null
+                ? Image.memory(_bytes!, height: 220, fit: BoxFit.contain)
+                : (old != null
+                    ? SizedBox(
+                        height: 220,
+                        child: PreviewImage(path: old['preview_path'] as String, fit: BoxFit.contain),
+                      )
+                    : const SizedBox.shrink()),
+          ),
           const SizedBox(height: 8),
           OutlinedButton.icon(
             onPressed: _pick,
             icon: const Icon(Icons.image_outlined),
-            label: Text(_bytes == null ? 'Choose edited image' : 'Change image'),
+            label: Text(
+              _edit
+                  ? (_bytes == null ? 'Replace image (optional)' : 'Choose a different image')
+                  : (_bytes == null ? 'Choose edited image' : 'Change image'),
+            ),
           ),
           const SizedBox(height: 4),
-          const Text(
-            'A watermark is added to the preview automatically. The original is shared only after payment approval.',
-            style: TextStyle(fontSize: 12),
+          Text(
+            _edit
+                ? 'Leave the image as it is to keep the current one. A new image gets a fresh watermarked preview.'
+                : 'A watermark is added to the preview automatically. The original is shared only after payment approval.',
+            style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 16),
           TextField(
             controller: _title,
-            decoration: const InputDecoration(labelText: 'Title', border: OutlineInputBorder()),
+            decoration: fieldDeco('Title', Icons.title_rounded),
           ),
           const SizedBox(height: 12),
           TextField(
             controller: _price,
             keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'Price (Rs)', border: OutlineInputBorder()),
+            decoration: fieldDeco('Price (Rs)', Icons.currency_rupee_rounded),
           ),
           const SizedBox(height: 12),
           TextField(
             controller: _cat,
-            decoration: const InputDecoration(labelText: 'Category', border: OutlineInputBorder()),
+            decoration: fieldDeco('Category', Icons.category_outlined),
           ),
           if (_existing.isNotEmpty) ...[
             const SizedBox(height: 8),
@@ -1506,12 +1606,12 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
           TextField(
             controller: _desc,
             maxLines: 3,
-            decoration: const InputDecoration(labelText: 'Description', border: OutlineInputBorder()),
+            decoration: fieldDeco('Description', Icons.notes_rounded),
           ),
           const SizedBox(height: 20),
           FilledButton(
             onPressed: _busy ? null : _save,
-            child: Text(_busy ? 'Uploading...' : 'Save'),
+            child: Text(_busy ? 'Saving...' : (_edit ? 'Save changes' : 'Save')),
           ),
         ],
       ),
