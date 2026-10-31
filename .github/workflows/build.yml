@@ -26,7 +26,7 @@ jobs:
       - name: Create Flutter project and add files
         run: |
           flutter create --org com.templatestore --project-name template_store --platforms android .
-          flutter pub add supabase_flutter image_picker url_launcher qr_flutter gal http package_info_plus file_picker
+          flutter pub add supabase_flutter image_picker url_launcher qr_flutter gal http package_info_plus file_picker:^8.1.2
           cp -f main.dart config.dart lib/
           rm -rf test
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n    <application#' android/app/src/main/AndroidManifest.xml
