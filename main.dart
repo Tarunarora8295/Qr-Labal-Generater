@@ -4,8 +4,9 @@ import 'dart:math' show Random;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:gal/gal.dart';
 import 'package:http/http.dart' as http;
@@ -31,7 +32,8 @@ const kTgBot = 'TamplateStoresupport_bot'; // Telegram bot that sends the user a
 // Looks on GitHub for a newer release. Tapping "Update" downloads the new APK;
 // installing it replaces the old app and keeps all data (needs the fixed signing key).
 Future<void> checkForUpdate(BuildContext context, {bool manual = false}) async {
-  if (kIsWeb) return;
+  // The updater downloads an APK, so it only makes sense on Android
+  if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
   try {
     final info = await PackageInfo.fromPlatform();
     final current = int.tryParse(info.buildNumber) ?? 0;
@@ -342,6 +344,13 @@ Future<Uint8List> freshImage(Uint8List bytes) async {
 // (On web, where a gallery does not exist, it falls back to opening the link.)
 Future<void> openOriginal(BuildContext context, String path) async {
   try {
+    if (path.toLowerCase().endsWith('.pdf')) {
+      // PDFs cannot go to the gallery: open the secure link, the browser downloads it
+      final url = await db.storage.from('originals').createSignedUrl(path, 3600);
+      final ok = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      if (!ok && context.mounted) toast(context, 'Could not open the PDF');
+      return;
+    }
     if (kIsWeb) {
       final url = await db.storage.from('originals').createSignedUrl(path, 3600);
       final ok = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
@@ -1040,7 +1049,8 @@ class AppDrawer extends StatelessWidget {
               );
             }),
           if (!isAdmin) const TelegramTile(),
-          item(Icons.system_update_rounded, 'Check for updates', () {
+          if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+            item(Icons.system_update_rounded, 'Check for updates', () {
             final ctx = shellKey.currentContext ?? context;
             Navigator.of(context).pop();
             checkForUpdate(ctx, manual: true);
@@ -2151,10 +2161,15 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
   final _cat = TextEditingController(text: 'General');
   List<String> _existing = [];
   XFile? _file;
-  Uint8List? _bytes;
+  Uint8List? _bytes; // chosen image (the file itself, or the preview cover for a PDF)
+  bool _isPdf = false;
+  Uint8List? _pdfBytes;
+  String? _pdfName;
   bool _busy = false;
 
   bool get _edit => widget.existing != null;
+  bool get _oldIsPdf =>
+      _edit && (widget.existing!['file_path'] ?? '').toString().toLowerCase().endsWith('.pdf');
 
   @override
   void initState() {
@@ -2166,6 +2181,7 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
       _price.text = pr is num && pr == pr.truncate() ? pr.toInt().toString() : '${pr ?? ''}';
       _cat.text = (e['category'] ?? 'General').toString();
       _desc.text = (e['description'] ?? '').toString();
+      _isPdf = _oldIsPdf;
     }
     _loadCats();
   }
@@ -2201,15 +2217,42 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
     });
   }
 
+  Future<void> _pickPdf() async {
+    final r = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+      withData: true,
+    );
+    if (r == null || r.files.isEmpty) return;
+    final f = r.files.first;
+    final b = f.bytes;
+    if (b == null) {
+      if (mounted) toast(context, 'Could not read this PDF');
+      return;
+    }
+    setState(() {
+      _pdfBytes = b;
+      _pdfName = f.name;
+    });
+  }
+
   Future<void> _save() async {
     final title = _title.text.trim();
     final price = num.tryParse(_price.text.trim());
-    final needImage = !_edit;
-    if ((needImage && _bytes == null) || title.isEmpty || price == null || price < 0) {
-      toast(
-        context,
-        _edit ? 'Please enter a title and a valid price' : 'Please choose an image, title and a valid price',
-      );
+    String? err;
+    if (title.isEmpty || price == null || price < 0) {
+      err = 'Please enter a title and a valid price';
+    } else if (_isPdf) {
+      if (_pdfBytes == null && !_oldIsPdf) {
+        err = 'Please choose the PDF file';
+      } else if (_bytes == null && !_edit) {
+        err = 'Please choose a preview image for the PDF';
+      }
+    } else if (_bytes == null && !(_edit && !_oldIsPdf)) {
+      err = 'Please choose an image';
+    }
+    if (err != null) {
+      toast(context, err);
       return;
     }
     setState(() => _busy = true);
@@ -2222,13 +2265,33 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
         'category': cat,
       };
 
-      // upload new image only when one was chosen
-      if (_bytes != null) {
+      // upload only what was chosen
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      String? newOrig;
+      String? newPrev;
+      if (_isPdf) {
+        if (_pdfBytes != null) {
+          newOrig = 'orig_$stamp.pdf';
+          await db.storage.from('originals').uploadBinary(
+                newOrig,
+                _pdfBytes!,
+                fileOptions: const FileOptions(contentType: 'application/pdf'),
+              );
+        }
+        if (_bytes != null) {
+          newPrev = 'prev_$stamp.png';
+          final preview = await makePreview(_bytes!);
+          await db.storage.from('previews').uploadBinary(
+                newPrev,
+                preview,
+                fileOptions: const FileOptions(contentType: 'image/png'),
+              );
+        }
+      } else if (_bytes != null) {
         final name = _file!.name;
         final ext = name.contains('.') ? name.split('.').last.toLowerCase() : 'jpg';
-        final stamp = DateTime.now().millisecondsSinceEpoch;
-        final filePath = 'orig_$stamp.$ext';
-        final previewPath = 'prev_$stamp.png';
+        newOrig = 'orig_$stamp.$ext';
+        newPrev = 'prev_$stamp.png';
         final ct = ext == 'png'
             ? 'image/png'
             : ext == 'webp'
@@ -2238,24 +2301,22 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
         final preview = await makePreview(_bytes!);
         await db.storage
             .from('originals')
-            .uploadBinary(filePath, _bytes!, fileOptions: FileOptions(contentType: ct));
+            .uploadBinary(newOrig, _bytes!, fileOptions: FileOptions(contentType: ct));
         await db.storage
             .from('previews')
-            .uploadBinary(previewPath, preview, fileOptions: const FileOptions(contentType: 'image/png'));
-        data['file_path'] = filePath;
-        data['preview_path'] = previewPath;
+            .uploadBinary(newPrev, preview, fileOptions: const FileOptions(contentType: 'image/png'));
       }
+      if (newOrig != null) data['file_path'] = newOrig;
+      if (newPrev != null) data['preview_path'] = newPrev;
 
       if (_edit) {
         final old = widget.existing!;
         final row = await db.from('templates').update(data).eq('id', old['id']).select().single();
-        if (_bytes != null) {
-          // remove the old image files; ignore errors, the update already succeeded
-          try {
-            await db.storage.from('originals').remove([old['file_path'] as String]);
-            await db.storage.from('previews').remove([old['preview_path'] as String]);
-          } catch (_) {}
-        }
+        // remove replaced files; ignore errors, the update already succeeded
+        try {
+          if (newOrig != null) await db.storage.from('originals').remove([old['file_path'] as String]);
+          if (newPrev != null) await db.storage.from('previews').remove([old['preview_path'] as String]);
+        } catch (_) {}
         if (mounted) Navigator.pop(context, Map<String, dynamic>.from(row));
       } else {
         await db.from('templates').insert(data);
@@ -2292,20 +2353,46 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
                     : const SizedBox.shrink()),
           ),
           const SizedBox(height: 8),
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(value: false, label: Text('Image'), icon: Icon(Icons.image_outlined)),
+              ButtonSegment(value: true, label: Text('PDF'), icon: Icon(Icons.picture_as_pdf_outlined)),
+            ],
+            selected: {_isPdf},
+            onSelectionChanged: (v) => setState(() => _isPdf = v.first),
+          ),
+          const SizedBox(height: 8),
+          if (_isPdf) ...[
+            OutlinedButton.icon(
+              onPressed: _pickPdf,
+              icon: const Icon(Icons.picture_as_pdf_outlined),
+              label: Text(
+                _pdfName ?? (_oldIsPdf ? 'Replace PDF (optional)' : 'Choose PDF file'),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
           OutlinedButton.icon(
             onPressed: _pick,
             icon: const Icon(Icons.image_outlined),
             label: Text(
-              _edit
-                  ? (_bytes == null ? 'Replace image (optional)' : 'Choose a different image')
-                  : (_bytes == null ? 'Choose edited image' : 'Change image'),
+              _isPdf
+                  ? (_bytes == null
+                      ? (_edit ? 'Replace preview image (optional)' : 'Choose preview image')
+                      : 'Choose a different preview image')
+                  : (_edit
+                      ? (_bytes == null ? 'Replace image (optional)' : 'Choose a different image')
+                      : (_bytes == null ? 'Choose edited image' : 'Change image')),
             ),
           ),
           const SizedBox(height: 4),
           Text(
-            _edit
-                ? 'Leave the image as it is to keep the current one. A new image gets a fresh watermarked preview.'
-                : 'A watermark is added to the preview automatically. The original is shared only after payment approval.',
+            _isPdf
+                ? 'Customers only see this preview image (with a watermark). The PDF is shared only after payment approval.'
+                : (_edit
+                    ? 'Leave the image as it is to keep the current one. A new image gets a fresh watermarked preview.'
+                    : 'A watermark is added to the preview automatically. The original is shared only after payment approval.'),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 16),
@@ -2810,8 +2897,9 @@ class _SupportPageState extends State<SupportPage> {
   }
 
   Future<void> _newTicket() async {
-    final subj = TextEditingController();
-    final msg = TextEditingController();
+    final model = TextEditingController();
+    final size = TextEditingController();
+    final serial = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
@@ -2820,13 +2908,11 @@ class _SupportPageState extends State<SupportPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(controller: subj, decoration: const InputDecoration(labelText: 'Subject')),
+              TextField(controller: model, decoration: const InputDecoration(labelText: 'Model')),
               const SizedBox(height: 8),
-              TextField(
-                controller: msg,
-                maxLines: 4,
-                decoration: const InputDecoration(labelText: 'Describe your problem'),
-              ),
+              TextField(controller: size, decoration: const InputDecoration(labelText: 'Size (optional)')),
+              const SizedBox(height: 8),
+              TextField(controller: serial, decoration: const InputDecoration(labelText: 'Serial number')),
             ],
           ),
         ),
@@ -2837,23 +2923,30 @@ class _SupportPageState extends State<SupportPage> {
       ),
     );
     if (ok != true) return;
-    final s = subj.text.trim();
-    final m = msg.text.trim();
-    if (s.isEmpty || m.isEmpty) {
-      if (mounted) toast(context, 'Please fill in both subject and message');
+    final m = model.text.trim();
+    final sz = size.text.trim();
+    final sn = serial.text.trim();
+    if (m.isEmpty || sn.isEmpty) {
+      if (mounted) toast(context, 'Please fill in model and serial number');
       return;
     }
     try {
       final t = await db
           .from('tickets')
-          .insert({'user_id': myId, 'user_email': myEmail, 'subject': s})
+          .insert({
+            'user_id': myId,
+            'user_email': myEmail,
+            'subject': m, // the "Model" is stored in the subject column
+            'size': sz.isEmpty ? null : sz,
+            'serial_no': sn,
+          })
           .select()
           .single();
       await db.from('ticket_messages').insert({
         'ticket_id': t['id'],
         'sender_id': myId,
         'is_admin': false,
-        'body': m,
+        'body': 'Model: $m\n${sz.isEmpty ? '' : 'Size: $sz\n'}Serial No: $sn',
       });
       _reload();
       if (mounted) await offerTelegramAlerts(context);
@@ -2901,9 +2994,19 @@ class _SupportPageState extends State<SupportPage> {
               separatorBuilder: (_, __) => const Divider(height: 1),
               itemBuilder: (c, i) {
                 final t = items[i];
+                final tsz = (t['size'] ?? '').toString().trim();
+                final tsn = (t['serial_no'] ?? '').toString().trim();
+                final info = [
+                  if (tsz.isNotEmpty) 'Size: $tsz',
+                  if (tsn.isNotEmpty) 'Serial: $tsn',
+                ].join('  |  ');
+                final sub = [
+                  if (widget.isAdmin) '${t['user_email'] ?? ''}',
+                  if (info.isNotEmpty) info,
+                ].join('\n');
                 return ListTile(
                   title: Text(t['subject'] as String),
-                  subtitle: widget.isAdmin ? Text('${t['user_email'] ?? ''}') : null,
+                  subtitle: sub.isEmpty ? null : Text(sub),
                   trailing: statusChip(t['status'] as String),
                   onTap: () async {
                     await Navigator.push(
@@ -2984,6 +3087,16 @@ class _TicketPageState extends State<TicketPage> {
     final ns = _status == 'open' ? 'closed' : 'open';
     try {
       await db.from('tickets').update({'status': ns}).eq('id', widget.ticket['id']);
+      if (ns == 'closed') {
+        // tell the customer (also triggers their Telegram alert)
+        await db.from('ticket_messages').insert({
+          'ticket_id': widget.ticket['id'],
+          'sender_id': myId,
+          'is_admin': true,
+          'body': 'Your work is complete. Please check.',
+        });
+        await _load();
+      }
       if (mounted) setState(() => _status = ns);
     } catch (e) {
       if (mounted) toast(context, 'Error: $e');
@@ -3005,11 +3118,26 @@ class _TicketPageState extends State<TicketPage> {
       ),
       body: Column(
         children: [
-          if (widget.isAdmin)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: Text('User: ${widget.ticket['user_email'] ?? ''}'),
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF1F1F9),
+              borderRadius: BorderRadius.circular(12),
             ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Model: ${widget.ticket['subject'] ?? ''}'),
+                if ((widget.ticket['size'] ?? '').toString().trim().isNotEmpty)
+                  Text('Size: ${widget.ticket['size']}'),
+                if ((widget.ticket['serial_no'] ?? '').toString().trim().isNotEmpty)
+                  Text('Serial No: ${widget.ticket['serial_no']}'),
+                if (widget.isAdmin) Text('User: ${widget.ticket['user_email'] ?? ''}'),
+              ],
+            ),
+          ),
           Expanded(
             child: ListView.builder(
               reverse: true,
