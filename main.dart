@@ -342,11 +342,11 @@ Future<Uint8List> freshImage(Uint8List bytes) async {
 
 // Downloads the original image and saves it straight into the phone gallery.
 // (On web, where a gallery does not exist, it falls back to opening the link.)
-Future<void> openOriginal(BuildContext context, String path, {String? name}) async {
+Future<void> openOriginal(BuildContext context, String path, {String? saveName}) async {
   try {
     if (path.toLowerCase().endsWith('.pdf')) {
       // 1) save the PDF into a folder the person picks (e.g. Downloads) - shows in the file manager
-      var base = (name ?? 'template').replaceAll(RegExp(r'[^A-Za-z0-9 _-]'), '').trim();
+      var base = (saveName ?? 'template').replaceAll(RegExp(r'[^A-Za-z0-9 _-]'), '').trim();
       if (base.isEmpty) base = 'template';
       try {
         final bytes = await db.storage.from('originals').download(path);
@@ -1741,7 +1741,7 @@ class _DetailPageState extends State<DetailPage> {
         SizedBox(
           width: double.infinity,
           child: FilledButton.icon(
-            onPressed: () => openOriginal(context, t['file_path'] as String, name: t['title'] as String),
+            onPressed: () => openOriginal(context, t['file_path'] as String, saveName: t['title'] as String),
             icon: const Icon(Icons.download),
             label: const Text('Download original'),
           ),
@@ -1769,7 +1769,7 @@ class _DetailPageState extends State<DetailPage> {
       action = SizedBox(
         width: double.infinity,
         child: FilledButton.icon(
-          onPressed: () => openOriginal(context, t['file_path'] as String, name: t['title'] as String),
+          onPressed: () => openOriginal(context, t['file_path'] as String, saveName: t['title'] as String),
           icon: const Icon(Icons.download),
           label: const Text('Download'),
         ),
@@ -2818,7 +2818,7 @@ class _OrdersPageState extends State<OrdersPage> {
                                       onPressed: () => openOriginal(
                                         context,
                                         (r['templates'] as Map<String, dynamic>)['file_path'] as String,
-                                        name: (r['templates'] as Map<String, dynamic>)['title'] as String,
+                                        saveName: (r['templates'] as Map<String, dynamic>)['title'] as String,
                                       ),
                                     ),
                                 ],
@@ -2879,7 +2879,7 @@ class _OrdersPageState extends State<OrdersPage> {
                           Align(
                             alignment: Alignment.centerRight,
                             child: FilledButton.tonalIcon(
-                              onPressed: () => openOriginal(context, t0['file_path'] as String, name: t0['title'] as String),
+                              onPressed: () => openOriginal(context, t0['file_path'] as String, saveName: t0['title'] as String),
                               icon: const Icon(Icons.download),
                               label: const Text('Download'),
                             ),
