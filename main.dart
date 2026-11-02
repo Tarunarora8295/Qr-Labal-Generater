@@ -2185,6 +2185,19 @@ class _BuyPageState extends State<BuyPage> {
   }
 }
 
+// ---------------------------------------------------------------- SUPPORT SIZES
+
+const kNoSize = '__none__';
+const kCustomSize = '__custom__';
+const kSizeOptions = <String>[
+  'IPTV (Length 4.2 / Height 3)',
+  'Zyot (Length 6 / Height 3.8)',
+  'ANKAP (Round 5/5)',
+  'AZYAP (Round 5/5)',
+  'AZYOD (Length 7.2 / Height 3.5)',
+  'ANKOD (Length 4.4 / Height 3.45)',
+];
+
 // ---------------------------------------------------------------- PROMO CODES (admin)
 
 class PromoAdminPage extends StatefulWidget {
@@ -3323,9 +3336,12 @@ class _SupportPageState extends State<SupportPage> {
     final model = TextEditingController();
     final size = TextEditingController();
     final serial = TextEditingController();
+    String? pickedSize;
+    String? sizeErr;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (c) => AlertDialog(
+      builder: (c) => StatefulBuilder(
+        builder: (c, setD) => AlertDialog(
         title: const Text('New support request'),
         content: SingleChildScrollView(
           child: Column(
@@ -3333,7 +3349,40 @@ class _SupportPageState extends State<SupportPage> {
             children: [
               TextField(controller: model, decoration: const InputDecoration(labelText: 'Model')),
               const SizedBox(height: 8),
-              TextField(controller: size, decoration: const InputDecoration(labelText: 'Size (optional)')),
+              InputDecorator(
+                decoration: const InputDecoration(labelText: 'Size (optional)'),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    isExpanded: true,
+                    value: pickedSize,
+                    hint: const Text('Select size'),
+                    items: [
+                      const DropdownMenuItem(value: kNoSize, child: Text('No size')),
+                      for (final o in kSizeOptions)
+                        DropdownMenuItem(
+                          value: o,
+                          child: Text(o, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 14)),
+                        ),
+                      const DropdownMenuItem(value: kCustomSize, child: Text('Custom size (type it yourself)')),
+                    ],
+                    onChanged: (v) => setD(() {
+                      pickedSize = v;
+                      sizeErr = null;
+                    }),
+                  ),
+                ),
+              ),
+              if (pickedSize == kCustomSize) ...[
+                const SizedBox(height: 8),
+                TextField(
+                  controller: size,
+                  decoration: InputDecoration(
+                    labelText: 'Your size',
+                    hintText: 'e.g. Length 5 / Height 3',
+                    errorText: sizeErr,
+                  ),
+                ),
+              ],
               const SizedBox(height: 8),
               TextField(
                 controller: serial,
@@ -3351,13 +3400,25 @@ class _SupportPageState extends State<SupportPage> {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Send')),
+          FilledButton(
+            onPressed: () {
+              if (pickedSize == kCustomSize && size.text.trim().isEmpty) {
+                setD(() => sizeErr = 'Please type your size');
+                return;
+              }
+              Navigator.pop(c, true);
+            },
+            child: const Text('Send'),
+          ),
         ],
+        ),
       ),
     );
     if (ok != true) return;
     final m = model.text.trim();
-    final sz = size.text.trim();
+    final sz = pickedSize == null || pickedSize == kNoSize
+        ? ''
+        : (pickedSize == kCustomSize ? size.text.trim() : pickedSize!);
     final sn = serial.text.trim();
     if (m.isEmpty || sn.isEmpty) {
       if (mounted) toast(context, 'Please fill in model and serial number');
