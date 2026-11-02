@@ -1058,6 +1058,12 @@ class AppDrawer extends StatelessWidget {
               nav.push(MaterialPageRoute(builder: (_) => ProfilePage(isAdmin: isAdmin)));
             },
           ),
+          if (isAdmin)
+            item(Icons.local_offer_outlined, 'Promo codes', () {
+              final nav = Navigator.of(context);
+              nav.pop();
+              nav.push(MaterialPageRoute(builder: (_) => const PromoAdminPage()));
+            }),
           if (!isAdmin)
             item(Icons.description_outlined, 'Terms & Privacy', () {
               Navigator.of(context).pop();
@@ -1928,9 +1934,52 @@ class BuyPage extends StatefulWidget {
 
 class _BuyPageState extends State<BuyPage> {
   final _utr = TextEditingController();
+  final _promo = TextEditingController();
   bool _busy = false;
+  bool _applying = false;
+  String? _appliedCode;
+  num _discount = 0;
 
   num get _total => widget.items.fold<num>(0, (a, t) => a + (t['price'] as num));
+  num get _payable => _total - _discount;
+
+  Future<void> _applyPromo() async {
+    final code = _promo.text.trim();
+    if (code.isEmpty) {
+      toast(context, 'Enter a promo code');
+      return;
+    }
+    setState(() => _applying = true);
+    try {
+      final r = await db.rpc('promo_quote', params: {'p_code': code, 'p_total': _total});
+      final m = Map<String, dynamic>.from(r as Map);
+      if (m['ok'] == true) {
+        setState(() {
+          _appliedCode = code.toUpperCase();
+          _discount = m['discount'] as num;
+        });
+        if (mounted) toast(context, 'Promo applied! You save ${money(_discount)}');
+      } else {
+        setState(() {
+          _appliedCode = null;
+          _discount = 0;
+        });
+        if (mounted) toast(context, (m['message'] ?? 'Invalid promo code').toString());
+      }
+    } catch (e) {
+      if (mounted) toast(context, 'Could not check the code: $e');
+    } finally {
+      if (mounted) setState(() => _applying = false);
+    }
+  }
+
+  void _removePromo() {
+    setState(() {
+      _appliedCode = null;
+      _discount = 0;
+      _promo.clear();
+    });
+  }
 
   String get _note => widget.items.length == 1
       ? widget.items.first['title'] as String
@@ -1938,7 +1987,7 @@ class _BuyPageState extends State<BuyPage> {
 
   String get _upiLink {
     return 'upi://pay?pa=$upiId&pn=${Uri.encodeComponent(payeeName)}'
-        '&am=${_total.toStringAsFixed(2)}&cu=INR'
+        '&am=${_payable.toStringAsFixed(2)}&cu=INR'
         '&tn=${Uri.encodeComponent(_note)}';
   }
 
@@ -1967,24 +2016,14 @@ class _BuyPageState extends State<BuyPage> {
     }
     setState(() => _busy = true);
     try {
-      // One payment = one UTR. All templates of this payment share a group id;
-      // only the first row is "primary" (the unique-UTR rule applies to it).
-      final group = newGroupId();
-      final rows = <Map<String, dynamic>>[];
-      for (var i = 0; i < widget.items.length; i++) {
-        rows.add({
-          'user_id': myId,
-          'user_email': myEmail,
-          'template_id': widget.items[i]['id'],
-          'utr': utr,
-          'status': 'pending',
-          'payment_group': group,
-          'is_primary': i == 0,
-          'customer_name': cname,
-          'customer_phone': cphone,
-        });
-      }
-      await db.from('orders').insert(rows);
+      // The server works out the price and the promo discount and saves the order
+      await db.rpc('place_order', params: {
+        'p_template_ids': widget.items.map((t) => t['id'].toString()).toList(),
+        'p_utr': utr,
+        'p_promo': _appliedCode,
+        'p_name': cname,
+        'p_phone': cphone,
+      });
       for (final t in widget.items) {
         cart.remove(t['id']);
       }
@@ -2030,7 +2069,58 @@ class _BuyPageState extends State<BuyPage> {
                 ),
               ),
           const SizedBox(height: 4),
-          Text('Amount: ${money(_total)}', style: Theme.of(context).textTheme.titleMedium),
+          if (_discount > 0) ...[
+            Text(
+              'Total: ${money(_total)}',
+              style: const TextStyle(decoration: TextDecoration.lineThrough),
+            ),
+            Text('Discount: -${money(_discount)}', style: TextStyle(color: Colors.green.shade700)),
+            Text('You pay: ${money(_payable)}', style: Theme.of(context).textTheme.titleMedium),
+          ] else
+            Text('Amount: ${money(_total)}', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 12),
+          if (_appliedCode == null)
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _promo,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: const InputDecoration(
+                      labelText: 'Promo code (optional)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: _applying ? null : _applyPromo,
+                  child: Text(_applying ? '...' : 'Apply'),
+                ),
+              ],
+            )
+          else
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.check_circle, color: Colors.green.shade700, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '$_appliedCode applied - you save ${money(_discount)}',
+                      style: TextStyle(color: Colors.green.shade800),
+                    ),
+                  ),
+                  TextButton(onPressed: _removePromo, child: const Text('Remove')),
+                ],
+              ),
+            ),
           const SizedBox(height: 20),
           const Text('Step 1: Pay with UPI'),
           const SizedBox(height: 8),
@@ -2090,6 +2180,297 @@ class _BuyPageState extends State<BuyPage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------- PROMO CODES (admin)
+
+class PromoAdminPage extends StatefulWidget {
+  const PromoAdminPage({super.key});
+
+  @override
+  State<PromoAdminPage> createState() => _PromoAdminPageState();
+}
+
+class _PromoAdminPageState extends State<PromoAdminPage> {
+  late Future<Rows> _future = _load();
+
+  Future<Rows> _load() async =>
+      asRows(await db.from('promo_codes').select().order('created_at', ascending: false));
+
+  void _reload() => setState(() => _future = _load());
+
+  String _n(num v) => v == v.roundToDouble() ? v.toInt().toString() : v.toString();
+
+  String _desc(Map<String, dynamic> p) {
+    final isPercent = p['discount_type'] == 'percent';
+    final v = p['discount_value'] as num;
+    final parts = <String>[isPercent ? '${_n(v)}% off' : '${money(v)} off'];
+    if (isPercent && p['max_discount'] != null) {
+      parts.add('max ${money(p['max_discount'] as num)}');
+    }
+    parts.add(p['first_order_only'] == true ? 'first order only' : 'any order');
+    final uses = p['max_uses'];
+    parts.add(uses == null ? 'used ${p['used_count']}' : 'used ${p['used_count']}/$uses');
+    final exp = p['expires_at'];
+    if (exp != null) {
+      final d = DateTime.parse(exp as String).toLocal();
+      parts.add('expires ${d.day}/${d.month}/${d.year}');
+    }
+    return parts.join('  |  ');
+  }
+
+  Future<void> _setActive(Map<String, dynamic> p, bool on) async {
+    try {
+      await db.from('promo_codes').update({'active': on}).eq('code', p['code']);
+      _reload();
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    }
+  }
+
+  Future<void> _delete(Map<String, dynamic> p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete promo code?'),
+        content: Text('${p['code']} will be removed. Customers will not be able to use it any more.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await db.from('promo_codes').delete().eq('code', p['code']);
+      _reload();
+      if (mounted) toast(context, 'Promo code deleted');
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    }
+  }
+
+  Future<void> _add() async {
+    final code = TextEditingController();
+    final value = TextEditingController();
+    final maxDisc = TextEditingController();
+    final maxUses = TextEditingController();
+    var percent = true;
+    var firstOnly = true;
+    DateTime? expiry;
+    String? err;
+
+    final data = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('New promo code'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: code,
+                  textCapitalization: TextCapitalization.characters,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+                    LengthLimitingTextInputFormatter(20),
+                  ],
+                  decoration: const InputDecoration(labelText: 'Code (e.g. WELCOME10)'),
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(value: true, label: Text('Percent %')),
+                    ButtonSegment(value: false, label: Text('Flat Rs')),
+                  ],
+                  selected: {percent},
+                  onSelectionChanged: (v) => setD(() => percent = v.first),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: value,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: InputDecoration(
+                    labelText: percent ? 'Discount percent (1 to 100)' : 'Discount amount in Rs',
+                  ),
+                ),
+                if (percent)
+                  TextField(
+                    controller: maxDisc,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'Max discount in Rs (optional)'),
+                  ),
+                TextField(
+                  controller: maxUses,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  decoration: const InputDecoration(labelText: 'Max total uses (optional)'),
+                ),
+                const SizedBox(height: 4),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: firstOnly,
+                  onChanged: (v) => setD(() => firstOnly = v),
+                  title: const Text('First order only'),
+                ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        expiry == null
+                            ? 'No expiry date'
+                            : 'Expires: ${expiry!.day}/${expiry!.month}/${expiry!.year}',
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        final d = await showDatePicker(
+                          context: ctx,
+                          initialDate: DateTime.now().add(const Duration(days: 30)),
+                          firstDate: DateTime.now(),
+                          lastDate: DateTime.now().add(const Duration(days: 3650)),
+                        );
+                        if (d != null) setD(() => expiry = d);
+                      },
+                      child: const Text('Set date'),
+                    ),
+                    if (expiry != null)
+                      IconButton(
+                        onPressed: () => setD(() => expiry = null),
+                        icon: const Icon(Icons.close, size: 18),
+                      ),
+                  ],
+                ),
+                if (err != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(err!, style: const TextStyle(color: Colors.red)),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () {
+                final c = code.text.trim().toUpperCase();
+                final v = num.tryParse(value.text.trim());
+                final md = num.tryParse(maxDisc.text.trim());
+                final mu = int.tryParse(maxUses.text.trim());
+                String? e;
+                if (c.length < 3) {
+                  e = 'Code must have at least 3 letters or digits';
+                } else if (v == null || v <= 0) {
+                  e = 'Enter a valid discount';
+                } else if (percent && v > 100) {
+                  e = 'Percent cannot be more than 100';
+                } else if (percent && maxDisc.text.trim().isNotEmpty && (md == null || md <= 0)) {
+                  e = 'Enter a valid max discount';
+                } else if (maxUses.text.trim().isNotEmpty && (mu == null || mu <= 0)) {
+                  e = 'Enter a valid number of uses';
+                }
+                if (e != null) {
+                  setD(() => err = e);
+                  return;
+                }
+                Navigator.pop(ctx, {
+                  'code': c,
+                  'discount_type': percent ? 'percent' : 'flat',
+                  'discount_value': v,
+                  'max_discount': percent && maxDisc.text.trim().isNotEmpty ? md : null,
+                  'first_order_only': firstOnly,
+                  'max_uses': maxUses.text.trim().isEmpty ? null : mu,
+                  'expires_at': expiry == null
+                      ? null
+                      : DateTime(expiry!.year, expiry!.month, expiry!.day, 23, 59, 59)
+                          .toUtc()
+                          .toIso8601String(),
+                });
+              },
+              child: const Text('Create'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (data == null) return;
+    try {
+      await db.from('promo_codes').insert(data);
+      _reload();
+      if (mounted) toast(context, 'Promo code ${data['code']} created');
+    } on PostgrestException catch (e) {
+      if (mounted) {
+        toast(
+          context,
+          e.code == '23505'
+              ? 'This code already exists'
+              : (e.code == '42501' ? 'Only the master account can do this' : 'Error: ${e.message}'),
+        );
+      }
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Promo codes')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _add,
+        icon: const Icon(Icons.add),
+        label: const Text('New code'),
+      ),
+      body: FutureBuilder<Rows>(
+        future: _future,
+        builder: (c, s) {
+          if (s.hasError) return Center(child: Text('Error: ${s.error}'));
+          if (!s.hasData) return const Center(child: CircularProgressIndicator());
+          final items = s.data!;
+          if (items.isEmpty) {
+            return const Center(child: Text('No promo codes yet. Tap "New code" to make one.'));
+          }
+          return RefreshIndicator(
+            onRefresh: () async => _reload(),
+            child: ListView.builder(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
+              itemCount: items.length,
+              itemBuilder: (c, i) {
+                final p = items[i];
+                final on = p['active'] == true;
+                return Card(
+                  child: ListTile(
+                    title: Text(
+                      p['code'] as String,
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1,
+                        color: on ? null : Colors.grey,
+                      ),
+                    ),
+                    subtitle: Text(_desc(p)),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Switch(value: on, onChanged: (v) => _setActive(p, v)),
+                        IconButton(
+                          tooltip: 'Delete',
+                          icon: const Icon(Icons.delete_outline, color: Colors.red),
+                          onPressed: () => _delete(p),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          );
+        },
       ),
     );
   }
@@ -2845,6 +3226,20 @@ class _OrdersPageState extends State<OrdersPage> {
                         if (_when(o['created_at']).isNotEmpty)
                           _infoRow(Icons.schedule_rounded, _when(o['created_at'])),
                         Text('UTR: ${o['utr'] ?? ''}'),
+                        Builder(builder: (_) {
+                          final pr = g.where((r) => (r['promo_code'] ?? '').toString().isNotEmpty).toList();
+                          if (pr.isEmpty) return const SizedBox.shrink();
+                          final x = pr.first;
+                          final paid = x['amount_paid'];
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              'Promo ${x['promo_code']}: -${money((x['discount'] ?? 0) as num)}'
+                              '   |   To pay: ${paid == null ? '-' : money(paid as num)}',
+                              style: TextStyle(color: Colors.green.shade700, fontWeight: FontWeight.w600),
+                            ),
+                          );
+                        }),
                         if (status == 'rejected' && (o['remarks'] ?? '').toString().trim().isNotEmpty)
                           Container(
                             width: double.infinity,
