@@ -2185,6 +2185,18 @@ class _BuyPageState extends State<BuyPage> {
   }
 }
 
+// ---------------------------------------------------------------- DATE + TIME
+
+// e.g. 05/11/26, 04:23:15 PM (phone's local time)
+String fmtFull(dynamic v) {
+  final d = DateTime.tryParse('${v ?? ''}')?.toLocal();
+  if (d == null) return '';
+  String two(int n) => n.toString().padLeft(2, '0');
+  final h12 = d.hour % 12 == 0 ? 12 : d.hour % 12;
+  final ap = d.hour >= 12 ? 'PM' : 'AM';
+  return '${two(d.day)}/${two(d.month)}/${two(d.year % 100)}, ${two(h12)}:${two(d.minute)}:${two(d.second)} $ap';
+}
+
 // ---------------------------------------------------------------- SUPPORT SIZES
 
 const kNoSize = '__none__';
@@ -3629,6 +3641,8 @@ class _TicketPageState extends State<TicketPage> {
                 if ((widget.ticket['serial_no'] ?? '').toString().trim().isNotEmpty)
                   Text('Serial No: ${widget.ticket['serial_no']}'),
                 if (widget.isAdmin) Text('User: ${widget.ticket['user_email'] ?? ''}'),
+                if (fmtFull(widget.ticket['created_at']).isNotEmpty)
+                  Text('Opened: ${fmtFull(widget.ticket['created_at'])}'),
               ],
             ),
           ),
@@ -3657,6 +3671,14 @@ class _TicketPageState extends State<TicketPage> {
                         if (fromAdmin && !widget.isAdmin)
                           const Text('Master', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                         Text(m['body'] as String),
+                        if (fmtFull(m['created_at']).isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(
+                              fmtFull(m['created_at']),
+                              style: const TextStyle(fontSize: 10, color: Colors.black54),
+                            ),
+                          ),
                       ],
                     ),
                   ),
