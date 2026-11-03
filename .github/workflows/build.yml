@@ -26,7 +26,7 @@ jobs:
       - name: Create Flutter project and add files
         run: |
           flutter create --org com.templatestore --project-name template_store --platforms android .
-          flutter pub add supabase_flutter image_picker url_launcher qr_flutter gal http package_info_plus file_picker:^8.1.2
+          flutter pub add supabase_flutter image_picker url_launcher qr_flutter gal http package_info_plus file_picker:^8.1.2 firebase_core firebase_messaging
           # file_picker 8.x is compiled against Android 34 but the other plugins need 36
           for f in $(find "${PUB_CACHE:-$HOME/.pub-cache}" -path '*file_picker-*/android/build.gradle' 2>/dev/null); do
             sed -i -E 's/compileSdk(Version)?[[:space:]]*=?[[:space:]]*[0-9]+/compileSdk = 36/' "$f"
@@ -36,6 +36,7 @@ jobs:
           rm -rf test
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>\n    <application#' android/app/src/main/AndroidManifest.xml
           sed -i 's/android:label="[^"]*"/android:label="Template Store"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <application#' android/app/src/main/AndroidManifest.xml
 
       # A fixed signing key lets a new APK install OVER the old app (no uninstall needed).
       # The key lives in the repo secret SIGNING_BUNDLE. Without it the build still works,
@@ -80,6 +81,60 @@ jobs:
           s = s.replace('signingConfig = signingConfigs.getByName("debug")', 'signingConfig = signingConfigs.getByName("release")', 1)
           p.write_text(s)
           print("Signing key applied")
+          PY
+
+      # Push notifications (Firebase). Needs the repo secret GOOGLE_SERVICES_JSON.
+      # Without it the app still builds and works, just without push pop-ups.
+      - name: Add Firebase for push notifications
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo "::warning::GOOGLE_SERVICES_JSON secret is missing - building WITHOUT push notifications"
+            exit 0
+          fi
+          echo "$GOOGLE_SERVICES_JSON" > android/app/google-services.json
+          python3 - <<'PY'
+          import pathlib, re
+
+          # Google services gradle plugin
+          sp = pathlib.Path("android/settings.gradle.kts")
+          s = sp.read_text()
+          m = re.search(r'^(\s*)id\("com\.android\.application"\)[^\n]*\n', s, re.M)
+          assert m, "com.android.application not found in settings.gradle.kts"
+          s = s[:m.end()] + m.group(1) + 'id("com.google.gms.google-services") version "4.4.2" apply false\n' + s[m.end():]
+          sp.write_text(s)
+
+          bp = pathlib.Path("android/app/build.gradle.kts")
+          b = bp.read_text()
+          m = re.search(r'^(\s*)id\("com\.android\.application"\)[^\n]*\n', b, re.M)
+          assert m, "com.android.application not found in app/build.gradle.kts"
+          b = b[:m.end()] + m.group(1) + 'id("com.google.gms.google-services")\n' + b[m.end():]
+          bp.write_text(b)
+
+          # high-importance channel so the alert pops up on screen
+          f = next(pathlib.Path("android/app/src/main").rglob("MainActivity.kt"))
+          pkg = re.search(r'^package\s+(\S+)', f.read_text(), re.M).group(1)
+          f.write_text(f"""package {pkg}
+
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.os.Build
+          import android.os.Bundle
+          import io.flutter.embedding.android.FlutterActivity
+
+          class MainActivity : FlutterActivity() {{
+              override fun onCreate(savedInstanceState: Bundle?) {{
+                  super.onCreate(savedInstanceState)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
+                      val ch = NotificationChannel("chat", "Chat and order alerts", NotificationManager.IMPORTANCE_HIGH)
+                      ch.description = "Support chat, orders and payments"
+                      getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
+                  }}
+              }}
+          }}
+          """)
+          print("Firebase configured")
           PY
 
       - name: Build APK
