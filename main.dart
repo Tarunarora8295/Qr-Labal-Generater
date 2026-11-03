@@ -4,6 +4,8 @@ import 'dart:math' show Random;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -411,6 +413,7 @@ Future<void> openOriginal(BuildContext context, String path, {String? saveName})
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
+  await initPush();
   runApp(const App());
 }
 
@@ -421,6 +424,7 @@ class App extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Template Store',
+      scaffoldMessengerKey: messengerKey,
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
       home: const AuthGate(),
@@ -854,6 +858,12 @@ class RoleLoader extends StatefulWidget {
 class _RoleLoaderState extends State<RoleLoader> {
   late final Future<bool> _admin = _load();
 
+  @override
+  void initState() {
+    super.initState();
+    registerPush(); // asks for notification permission and saves this phone for push alerts
+  }
+
   Future<bool> _load() async {
     try {
       final r = await db.from('profiles').select('role').eq('id', myId!).maybeSingle();
@@ -1093,9 +1103,10 @@ class AppDrawer extends StatelessWidget {
           item(
             Icons.logout_rounded,
             'Logout',
-            () {
+            () async {
               cart.clear();
-              db.auth.signOut();
+              await unregisterPush();
+              await db.auth.signOut();
             },
             color: const Color(0xFFD92D20),
           ),
@@ -2183,6 +2194,69 @@ class _BuyPageState extends State<BuyPage> {
       ),
     );
   }
+}
+
+// ---------------------------------------------------------------- PUSH NOTIFICATIONS
+
+final messengerKey = GlobalKey<ScaffoldMessengerState>();
+bool pushReady = false;
+String? pushToken;
+
+// Starts Firebase. If the Firebase files are missing the app still works, just without push.
+Future<void> initPush() async {
+  if (kIsWeb) return;
+  try {
+    await Firebase.initializeApp();
+    pushReady = true;
+    FirebaseMessaging.instance.onTokenRefresh.listen((t) {
+      pushToken = t;
+      savePushToken();
+    });
+    // app is open: show the alert as a banner (the system only shows it when the app is closed)
+    FirebaseMessaging.onMessage.listen((m) {
+      final n = m.notification;
+      if (n == null) return;
+      final text = [
+        if ((n.title ?? '').isNotEmpty) n.title!,
+        if ((n.body ?? '').isNotEmpty) n.body!,
+      ].join('\n');
+      messengerKey.currentState?.showSnackBar(
+        SnackBar(
+          content: Text(text),
+          duration: const Duration(seconds: 5),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    });
+  } catch (_) {
+    pushReady = false;
+  }
+}
+
+Future<void> registerPush() async {
+  if (!pushReady || myId == null) return;
+  try {
+    final st = await FirebaseMessaging.instance.requestPermission();
+    if (st.authorizationStatus == AuthorizationStatus.denied) return;
+    pushToken = await FirebaseMessaging.instance.getToken();
+    await savePushToken();
+  } catch (_) {}
+}
+
+Future<void> savePushToken() async {
+  final t = pushToken;
+  if (t == null || myId == null) return;
+  try {
+    await db.rpc('register_device', params: {'p_token': t});
+  } catch (_) {}
+}
+
+Future<void> unregisterPush() async {
+  final t = pushToken;
+  if (t == null) return;
+  try {
+    await db.rpc('unregister_device', params: {'p_token': t});
+  } catch (_) {}
 }
 
 // ---------------------------------------------------------------- DATE + TIME
@@ -4001,9 +4075,10 @@ class _ProfilePageState extends State<ProfilePage> {
           ],
           const SizedBox(height: 22),
           OutlinedButton.icon(
-            onPressed: () {
+            onPressed: () async {
               cart.clear();
-              db.auth.signOut();
+              await unregisterPush();
+              await db.auth.signOut();
             },
             icon: const Icon(Icons.logout_rounded),
             label: const Text('Logout'),
