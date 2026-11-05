@@ -425,6 +425,7 @@ class App extends StatelessWidget {
     return MaterialApp(
       title: 'Template Store',
       scaffoldMessengerKey: messengerKey,
+      navigatorKey: navKey,
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
       home: const AuthGate(),
@@ -906,6 +907,8 @@ class _HomeShellState extends State<HomeShell> {
   void initState() {
     super.initState();
     shellTab.value = 0;
+    appIsAdmin = widget.isAdmin;
+    WidgetsBinding.instance.addPostFrameCallback((_) => consumePendingPush());
     loadFavs();
     if (!kIsWeb) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1068,6 +1071,12 @@ class AppDrawer extends StatelessWidget {
               nav.push(MaterialPageRoute(builder: (_) => ProfilePage(isAdmin: isAdmin)));
             },
           ),
+          if (isAdmin)
+            item(Icons.campaign_outlined, 'Send notification', () {
+              final nav = Navigator.of(context);
+              nav.pop();
+              nav.push(MaterialPageRoute(builder: (_) => const PushAdminPage()));
+            }),
           if (isAdmin)
             item(Icons.local_offer_outlined, 'Promo codes', () {
               final nav = Navigator.of(context);
@@ -2199,8 +2208,36 @@ class _BuyPageState extends State<BuyPage> {
 // ---------------------------------------------------------------- PUSH NOTIFICATIONS
 
 final messengerKey = GlobalKey<ScaffoldMessengerState>();
+final navKey = GlobalKey<NavigatorState>();
 bool pushReady = false;
 String? pushToken;
+bool appIsAdmin = false;
+Map<String, dynamic>? pendingPush; // notification that opened the app from closed
+
+// Opens the right screen when a notification is tapped
+Future<void> openFromPush(Map<String, dynamic> data) async {
+  final type = '${data['type'] ?? ''}';
+  try {
+    if (type == 'ticket' && data['ticket_id'] != null) {
+      final t = await db.from('tickets').select().eq('id', data['ticket_id']).maybeSingle();
+      if (t == null) return;
+      navKey.currentState?.push(
+        MaterialPageRoute(builder: (_) => TicketPage(ticket: Map<String, dynamic>.from(t), isAdmin: appIsAdmin)),
+      );
+    } else if (type == 'orders') {
+      shellTab.value = 1;
+    } else if (type == 'store') {
+      shellTab.value = 0;
+    }
+  } catch (_) {}
+}
+
+void consumePendingPush() {
+  final d = pendingPush;
+  if (d == null) return;
+  pendingPush = null;
+  openFromPush(d);
+}
 
 // Starts Firebase. If the Firebase files are missing the app still works, just without push.
 Future<void> initPush() async {
@@ -2213,6 +2250,11 @@ Future<void> initPush() async {
       savePushToken();
     });
     // app is open: show the alert as a banner (the system only shows it when the app is closed)
+    // tapped while the app was in the background
+    FirebaseMessaging.onMessageOpenedApp.listen((m) => openFromPush(Map<String, dynamic>.from(m.data)));
+    // tapped while the app was closed
+    final first = await FirebaseMessaging.instance.getInitialMessage();
+    if (first != null) pendingPush = Map<String, dynamic>.from(first.data);
     FirebaseMessaging.onMessage.listen((m) {
       final n = m.notification;
       if (n == null) return;
@@ -2223,8 +2265,11 @@ Future<void> initPush() async {
       messengerKey.currentState?.showSnackBar(
         SnackBar(
           content: Text(text),
-          duration: const Duration(seconds: 5),
+          duration: const Duration(seconds: 6),
           behavior: SnackBarBehavior.floating,
+          action: m.data['type'] == 'ticket'
+              ? SnackBarAction(label: 'Open', onPressed: () => openFromPush(Map<String, dynamic>.from(m.data)))
+              : null,
         ),
       );
     });
@@ -2283,6 +2328,197 @@ const kSizeOptions = <String>[
   'AZYOD (Length 7.2 / Height 3.5)',
   'ANKOD (Length 4.4 / Height 3.45)',
 ];
+
+// ---------------------------------------------------------------- SEND NOTIFICATION (admin)
+
+class PushAdminPage extends StatefulWidget {
+  const PushAdminPage({super.key});
+
+  @override
+  State<PushAdminPage> createState() => _PushAdminPageState();
+}
+
+class _PushAdminPageState extends State<PushAdminPage> {
+  final _title = TextEditingController();
+  final _body = TextEditingController();
+  final _search = TextEditingController();
+  bool _all = true;
+  bool _busy = false;
+  bool _loadingUsers = false;
+  Rows _users = [];
+  Map<String, dynamic>? _picked;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUsers();
+  }
+
+  Future<void> _loadUsers() async {
+    setState(() => _loadingUsers = true);
+    try {
+      final r = await db.rpc('admin_list_users');
+      if (mounted) setState(() => _users = asRows(r));
+    } catch (e) {
+      if (mounted) toast(context, 'Could not load users: $e');
+    } finally {
+      if (mounted) setState(() => _loadingUsers = false);
+    }
+  }
+
+  Future<void> _send() async {
+    final t = _title.text.trim();
+    final b = _body.text.trim();
+    if (t.isEmpty || b.isEmpty) {
+      toast(context, 'Enter a title and a message');
+      return;
+    }
+    if (!_all && _picked == null) {
+      toast(context, 'Choose a user first');
+      return;
+    }
+    if (_all) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Send to everyone?'),
+          content: Text('"$t" will be sent to every user who has notifications on.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('Send')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    setState(() => _busy = true);
+    try {
+      final r = await db.rpc('admin_send_push', params: {
+        'p_user': _all ? null : _picked!['id'],
+        'p_title': t,
+        'p_body': b,
+      });
+      final m = Map<String, dynamic>.from(r as Map);
+      final n = (m['devices'] ?? 0) as num;
+      if (!mounted) return;
+      if (n == 0) {
+        toast(context, _all ? 'No phone has notifications turned on yet' : 'This user has not turned on notifications');
+      } else {
+        toast(context, 'Sent to $n phone${n == 1 ? '' : 's'}');
+        _title.clear();
+        _body.clear();
+      }
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = _search.text.trim().toLowerCase();
+    final shown = _users.where((u) {
+      if (q.isEmpty) return true;
+      return '${u['email'] ?? ''} ${u['name'] ?? ''}'.toLowerCase().contains(q);
+    }).toList();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Send notification')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(value: true, label: Text('Everyone'), icon: Icon(Icons.groups_outlined)),
+              ButtonSegment(value: false, label: Text('One user'), icon: Icon(Icons.person_outline)),
+            ],
+            selected: {_all},
+            onSelectionChanged: (v) => setState(() => _all = v.first),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _title,
+            maxLength: 60,
+            decoration: const InputDecoration(labelText: 'Title', border: OutlineInputBorder()),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _body,
+            maxLength: 200,
+            minLines: 2,
+            maxLines: 4,
+            decoration: const InputDecoration(labelText: 'Message', border: OutlineInputBorder()),
+          ),
+          if (!_all) ...[
+            const SizedBox(height: 8),
+            if (_picked != null)
+              Container(
+                padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.check_circle, color: Colors.green.shade700, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text('${_picked!['email'] ?? ''}')),
+                    TextButton(onPressed: () => setState(() => _picked = null), child: const Text('Change')),
+                  ],
+                ),
+              )
+            else ...[
+              TextField(
+                controller: _search,
+                onChanged: (_) => setState(() {}),
+                decoration: const InputDecoration(
+                  labelText: 'Search user by name or email',
+                  prefixIcon: Icon(Icons.search),
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 6),
+              if (_loadingUsers)
+                const Padding(padding: EdgeInsets.all(16), child: Center(child: CircularProgressIndicator()))
+              else if (shown.isEmpty)
+                const Padding(padding: EdgeInsets.all(16), child: Center(child: Text('No users found')))
+              else
+                for (final u in shown.take(50))
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: Icon(
+                      u['has_device'] == true ? Icons.notifications_active : Icons.notifications_off_outlined,
+                      color: u['has_device'] == true ? Colors.green.shade700 : Colors.grey,
+                    ),
+                    title: Text('${u['email'] ?? ''}'),
+                    subtitle: ('${u['name'] ?? ''}').trim().isEmpty ? null : Text('${u['name']}'),
+                    onTap: () => setState(() => _picked = u),
+                  ),
+              const Padding(
+                padding: EdgeInsets.only(top: 4),
+                child: Text(
+                  'Green bell = this user has notifications turned on',
+                  style: TextStyle(fontSize: 12, color: Colors.black54),
+                ),
+              ),
+            ],
+          ],
+          const SizedBox(height: 16),
+          FilledButton.icon(
+            onPressed: _busy ? null : _send,
+            icon: _busy
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.send_rounded),
+            label: Text(_all ? 'Send to everyone' : 'Send to this user'),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 // ---------------------------------------------------------------- PROMO CODES (admin)
 
