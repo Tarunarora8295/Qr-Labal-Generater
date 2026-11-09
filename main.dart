@@ -1072,6 +1072,12 @@ class AppDrawer extends StatelessWidget {
             },
           ),
           if (isAdmin)
+            item(Icons.people_outline, 'Users', () {
+              final nav = Navigator.of(context);
+              nav.pop();
+              nav.push(MaterialPageRoute(builder: (_) => const UsersAdminPage()));
+            }),
+          if (isAdmin)
             item(Icons.campaign_outlined, 'Send notification', () {
               final nav = Navigator.of(context);
               nav.pop();
@@ -2329,10 +2335,234 @@ const kSizeOptions = <String>[
   'ANKOD (Length 4.4 / Height 3.45)',
 ];
 
+// ---------------------------------------------------------------- USERS (admin)
+
+class UsersAdminPage extends StatefulWidget {
+  const UsersAdminPage({super.key});
+
+  @override
+  State<UsersAdminPage> createState() => _UsersAdminPageState();
+}
+
+class _UsersAdminPageState extends State<UsersAdminPage> {
+  final _search = TextEditingController();
+  Rows _users = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final r = await db.rpc('admin_users_overview');
+      if (mounted) setState(() => _users = asRows(r));
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  String _shortDate(dynamic v) {
+    final f = fmtFull(v);
+    return f.isEmpty ? '-' : f.split(',').first;
+  }
+
+  Widget _row(String label, String value, {Widget? trailing}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 120, child: Text(label, style: const TextStyle(color: Colors.black54))),
+          Expanded(child: Text(value, style: const TextStyle(fontWeight: FontWeight.w600))),
+          if (trailing != null) trailing,
+        ],
+      ),
+    );
+  }
+
+  void _open(Map<String, dynamic> u) {
+    final phone = '${u['phone'] ?? ''}'.trim();
+    final digits = phone.replaceAll(RegExp(r'\D'), '');
+    final name = '${u['name'] ?? ''}'.trim();
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (c) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(name.isEmpty ? '${u['email'] ?? ''}' : name,
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 10),
+              _row(
+                'Email',
+                '${u['email'] ?? '-'}',
+                trailing: IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.copy, size: 18),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: '${u['email'] ?? ''}'));
+                    toast(context, 'Email copied');
+                  },
+                ),
+              ),
+              _row('Phone', phone.isEmpty ? '-' : phone),
+              _row('Joined', fmtFull(u['joined']).isEmpty ? '-' : fmtFull(u['joined'])),
+              _row('Last login', fmtFull(u['last_login']).isEmpty ? '-' : fmtFull(u['last_login'])),
+              const Divider(height: 24),
+              _row('Orders', '${u['orders_approved'] ?? 0} approved of ${u['orders_total'] ?? 0}'),
+              _row('Total paid', money((u['spent'] ?? 0) as num)),
+              _row('Last order', fmtFull(u['last_order']).isEmpty ? '-' : fmtFull(u['last_order'])),
+              _row('Support tickets', '${u['tickets_total'] ?? 0} (${u['tickets_open'] ?? 0} open)'),
+              const Divider(height: 24),
+              _row('Notifications', u['has_device'] == true ? 'On' : 'Off'),
+              _row('Telegram alerts', u['telegram'] == true ? 'Linked' : 'Not linked'),
+              _row('Role', '${u['role'] ?? 'user'}'),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    icon: const Icon(Icons.campaign_outlined),
+                    label: const Text('Send notification'),
+                    onPressed: () {
+                      Navigator.pop(c);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => PushAdminPage(initialUser: u)),
+                      );
+                    },
+                  ),
+                  if (digits.isNotEmpty)
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.call_outlined),
+                      label: const Text('Call'),
+                      onPressed: () => launchUrl(Uri(scheme: 'tel', path: phone)),
+                    ),
+                  if (digits.isNotEmpty)
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.chat_outlined),
+                      label: const Text('WhatsApp'),
+                      onPressed: () => launchUrl(
+                        Uri.parse('https://wa.me/$digits'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = _search.text.trim().toLowerCase();
+    final shown = _users.where((u) {
+      if (q.isEmpty) return true;
+      return '${u['email'] ?? ''} ${u['name'] ?? ''} ${u['phone'] ?? ''}'.toLowerCase().contains(q);
+    }).toList();
+    final withPush = _users.where((u) => u['has_device'] == true).length;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Users'),
+        actions: [IconButton(tooltip: 'Refresh', onPressed: _load, icon: const Icon(Icons.refresh))],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text('Error: $_error')))
+              : Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                      child: TextField(
+                        controller: _search,
+                        onChanged: (_) => setState(() {}),
+                        decoration: const InputDecoration(
+                          labelText: 'Search by name, email or phone',
+                          prefixIcon: Icon(Icons.search),
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '${_users.length} users  |  $withPush with notifications on',
+                          style: const TextStyle(color: Colors.black54),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: shown.isEmpty
+                          ? const Center(child: Text('No users found'))
+                          : RefreshIndicator(
+                              onRefresh: _load,
+                              child: ListView.builder(
+                                padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
+                                itemCount: shown.length,
+                                itemBuilder: (c, i) {
+                                  final u = shown[i];
+                                  final name = '${u['name'] ?? ''}'.trim();
+                                  final title = name.isEmpty ? '${u['email'] ?? ''}' : name;
+                                  return Card(
+                                    child: ListTile(
+                                      onTap: () => _open(u),
+                                      leading: CircleAvatar(
+                                        child: Text(title.isEmpty ? '?' : title[0].toUpperCase()),
+                                      ),
+                                      title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                                      subtitle: Text(
+                                        '${name.isEmpty ? '' : '${u['email'] ?? ''}\n'}'
+                                        'Joined ${_shortDate(u['joined'])}  |  ${u['orders_approved'] ?? 0} orders  |  '
+                                        '${money((u['spent'] ?? 0) as num)}',
+                                      ),
+                                      isThreeLine: name.isNotEmpty,
+                                      trailing: Icon(
+                                        u['has_device'] == true
+                                            ? Icons.notifications_active
+                                            : Icons.notifications_off_outlined,
+                                        color: u['has_device'] == true ? Colors.green.shade700 : Colors.grey,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
+    );
+  }
+}
+
 // ---------------------------------------------------------------- SEND NOTIFICATION (admin)
 
 class PushAdminPage extends StatefulWidget {
-  const PushAdminPage({super.key});
+  final Map<String, dynamic>? initialUser;
+  const PushAdminPage({super.key, this.initialUser});
 
   @override
   State<PushAdminPage> createState() => _PushAdminPageState();
@@ -2347,11 +2577,31 @@ class _PushAdminPageState extends State<PushAdminPage> {
   bool _loadingUsers = false;
   Rows _users = [];
   Map<String, dynamic>? _picked;
+  Rows _history = [];
+  int _filter = 0; // 0 all, 1 sent by me, 2 automatic
+  bool _loadingHistory = false;
 
   @override
   void initState() {
     super.initState();
+    if (widget.initialUser != null) {
+      _all = false;
+      _picked = Map<String, dynamic>.from(widget.initialUser!);
+    }
     _loadUsers();
+    _loadHistory();
+  }
+
+  Future<void> _loadHistory() async {
+    setState(() => _loadingHistory = true);
+    try {
+      final r = await db.rpc('admin_push_history', params: {'p_limit': 100});
+      if (mounted) setState(() => _history = asRows(r));
+    } catch (e) {
+      if (mounted) toast(context, 'Could not load history: $e');
+    } finally {
+      if (mounted) setState(() => _loadingHistory = false);
+    }
   }
 
   Future<void> _loadUsers() async {
@@ -2407,6 +2657,7 @@ class _PushAdminPageState extends State<PushAdminPage> {
         toast(context, 'Sent to $n phone${n == 1 ? '' : 's'}');
         _title.clear();
         _body.clear();
+        _loadHistory();
       }
     } catch (e) {
       if (mounted) toast(context, 'Error: $e');
@@ -2422,9 +2673,25 @@ class _PushAdminPageState extends State<PushAdminPage> {
       if (q.isEmpty) return true;
       return '${u['email'] ?? ''} ${u['name'] ?? ''}'.toLowerCase().contains(q);
     }).toList();
+    final hist = _history.where((h) {
+      if (_filter == 0) return true;
+      return _filter == 1 ? h['kind'] == 'info' : h['kind'] != 'info';
+    }).toList();
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Send notification')),
+      appBar: AppBar(
+        title: const Text('Send notification'),
+        actions: [
+          IconButton(
+            tooltip: 'All users and details',
+            icon: const Icon(Icons.people_outline),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const UsersAdminPage()),
+            ),
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -2514,6 +2781,53 @@ class _PushAdminPageState extends State<PushAdminPage> {
                 : const Icon(Icons.send_rounded),
             label: Text(_all ? 'Send to everyone' : 'Send to this user'),
           ),
+          const SizedBox(height: 28),
+          Row(
+            children: [
+              const Expanded(
+                child: Text('Notification history', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              ),
+              IconButton(
+                tooltip: 'Refresh',
+                onPressed: _loadingHistory ? null : _loadHistory,
+                icon: const Icon(Icons.refresh),
+              ),
+            ],
+          ),
+          Wrap(
+            spacing: 8,
+            children: [
+              ChoiceChip(label: const Text('All'), selected: _filter == 0, onSelected: (_) => setState(() => _filter = 0)),
+              ChoiceChip(
+                label: const Text('Sent by me'),
+                selected: _filter == 1,
+                onSelected: (_) => setState(() => _filter = 1),
+              ),
+              ChoiceChip(
+                label: const Text('Automatic'),
+                selected: _filter == 2,
+                onSelected: (_) => setState(() => _filter = 2),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          if (_loadingHistory)
+            const Padding(padding: EdgeInsets.all(16), child: Center(child: CircularProgressIndicator()))
+          else if (hist.isEmpty)
+            const Padding(padding: EdgeInsets.all(16), child: Center(child: Text('Nothing sent yet')))
+          else
+            for (final h in hist.take(60))
+              Card(
+                child: ListTile(
+                  dense: true,
+                  isThreeLine: true,
+                  title: Text('${h['title'] ?? ''}', style: const TextStyle(fontWeight: FontWeight.w700)),
+                  subtitle: Text(
+                    '${h['body'] ?? ''}\n'
+                    '${fmtFull(h['created_at'])}  |  ${h['target'] ?? ''}  |  ${h['devices'] ?? 0} phone(s)',
+                  ),
+                ),
+              ),
         ],
       ),
     );
@@ -3658,6 +3972,7 @@ class _SupportPageState extends State<SupportPage> {
     final model = TextEditingController();
     final size = TextEditingController();
     final serial = TextEditingController();
+    String? formErr;
     String? pickedSize;
     String? sizeErr;
     final ok = await showDialog<bool>(
@@ -3717,6 +4032,11 @@ class _SupportPageState extends State<SupportPage> {
                   alignLabelWithHint: true,
                 ),
               ),
+              if (formErr != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(formErr!, style: const TextStyle(color: Colors.red)),
+                ),
             ],
           ),
         ),
@@ -3724,6 +4044,10 @@ class _SupportPageState extends State<SupportPage> {
           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
           FilledButton(
             onPressed: () {
+              if (model.text.trim().isEmpty || serial.text.trim().isEmpty) {
+                setD(() => formErr = 'Please fill in model and serial number');
+                return;
+              }
               if (pickedSize == kCustomSize && size.text.trim().isEmpty) {
                 setD(() => sizeErr = 'Please type your size');
                 return;
@@ -3771,6 +4095,17 @@ class _SupportPageState extends State<SupportPage> {
     }
   }
 
+  Future<void> _reportProblem() async {
+    final ok = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => const ProblemPage()),
+    );
+    if (ok == true) {
+      _reload();
+      if (mounted) await offerTelegramAlerts(context);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -3780,10 +4115,24 @@ class _SupportPageState extends State<SupportPage> {
       ),
       floatingActionButton: widget.isAdmin
           ? null
-          : FloatingActionButton.extended(
-              onPressed: _newTicket,
-              icon: const Icon(Icons.add),
-              label: const Text('New request'),
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                FloatingActionButton.extended(
+                  heroTag: 'support_problem',
+                  onPressed: _reportProblem,
+                  icon: const Icon(Icons.report_problem_outlined),
+                  label: const Text('Report a problem'),
+                ),
+                const SizedBox(height: 10),
+                FloatingActionButton.extended(
+                  heroTag: 'support_request',
+                  onPressed: _newTicket,
+                  icon: const Icon(Icons.add),
+                  label: const Text('New request'),
+                ),
+              ],
             ),
       body: RefreshIndicator(
         onRefresh: () async {
@@ -3821,6 +4170,7 @@ class _SupportPageState extends State<SupportPage> {
                   if (info.isNotEmpty) info,
                 ].join('\n');
                 return ListTile(
+                  leading: Icon(t['kind'] == 'problem' ? Icons.report_problem_outlined : Icons.build_outlined),
                   title: Text(t['subject'] as String),
                   subtitle: sub.isEmpty ? null : Text(sub),
                   trailing: statusChip(t['status'] as String),
@@ -3836,6 +4186,231 @@ class _SupportPageState extends State<SupportPage> {
             );
           },
         ),
+      ),
+    );
+  }
+}
+
+class SupportPhoto extends StatefulWidget {
+  final String path;
+  const SupportPhoto({super.key, required this.path});
+
+  @override
+  State<SupportPhoto> createState() => _SupportPhotoState();
+}
+
+class _SupportPhotoState extends State<SupportPhoto> {
+  late final Future<String> _url = db.storage.from('support-files').createSignedUrl(widget.path, 3600);
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String>(
+      future: _url,
+      builder: (c, s) {
+        if (s.hasError) {
+          return const SizedBox(width: 90, height: 90, child: Icon(Icons.broken_image_outlined));
+        }
+        if (!s.hasData) {
+          return const SizedBox(
+            width: 90,
+            height: 90,
+            child: Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+          );
+        }
+        final url = s.data!;
+        return GestureDetector(
+          onTap: () => showDialog(
+            context: c,
+            builder: (_) => Dialog(
+              insetPadding: const EdgeInsets.all(8),
+              child: InteractiveViewer(child: Image.network(url)),
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.network(
+              url,
+              width: 90,
+              height: 90,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) =>
+                  const SizedBox(width: 90, height: 90, child: Icon(Icons.broken_image_outlined)),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _Pic {
+  final Uint8List bytes;
+  final String name;
+  _Pic(this.bytes, this.name);
+}
+
+class ProblemPage extends StatefulWidget {
+  const ProblemPage({super.key});
+
+  @override
+  State<ProblemPage> createState() => _ProblemPageState();
+}
+
+class _ProblemPageState extends State<ProblemPage> {
+  static const _maxPhotos = 4;
+  final _text = TextEditingController();
+  final List<_Pic> _pics = [];
+  bool _busy = false;
+
+  Future<void> _fromGallery() async {
+    try {
+      final picked = await ImagePicker().pickMultiImage(imageQuality: 80, maxWidth: 1600);
+      for (final x in picked) {
+        if (_pics.length >= _maxPhotos) break;
+        _pics.add(_Pic(await x.readAsBytes(), x.name));
+      }
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (mounted) toast(context, 'Could not add the photo: $e');
+    }
+  }
+
+  Future<void> _fromCamera() async {
+    if (_pics.length >= _maxPhotos) return;
+    try {
+      final x = await ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 80, maxWidth: 1600);
+      if (x == null) return;
+      _pics.add(_Pic(await x.readAsBytes(), x.name));
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (mounted) toast(context, 'Could not open the camera: $e');
+    }
+  }
+
+  Future<void> _send() async {
+    final text = _text.text.trim();
+    if (text.isEmpty) {
+      toast(context, 'Please describe your problem');
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final paths = <String>[];
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      for (var i = 0; i < _pics.length; i++) {
+        final n = _pics[i].name.toLowerCase();
+        final ext = n.endsWith('.png') ? 'png' : (n.endsWith('.webp') ? 'webp' : 'jpg');
+        final ct = ext == 'png' ? 'image/png' : (ext == 'webp' ? 'image/webp' : 'image/jpeg');
+        final path = '$myId/${stamp}_$i.$ext';
+        await db.storage.from('support-files').uploadBinary(
+              path,
+              _pics[i].bytes,
+              fileOptions: FileOptions(contentType: ct),
+            );
+        paths.add(path);
+      }
+      final short = text.replaceAll(RegExp(r'\s+'), ' ');
+      final subject = 'Problem: ${short.length > 40 ? '${short.substring(0, 40)}...' : short}';
+      final t = await db
+          .from('tickets')
+          .insert({'user_id': myId, 'user_email': myEmail, 'subject': subject, 'kind': 'problem'})
+          .select()
+          .single();
+      await db.from('ticket_messages').insert({
+        'ticket_id': t['id'],
+        'sender_id': myId,
+        'is_admin': false,
+        'body': paths.isEmpty
+            ? text
+            : '$text\n(${paths.length} photo${paths.length == 1 ? '' : 's'} attached)',
+        'images': paths,
+      });
+      if (mounted) Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Report a problem')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(
+            controller: _text,
+            minLines: 5,
+            maxLines: 12,
+            maxLength: 1000,
+            keyboardType: TextInputType.multiline,
+            textInputAction: TextInputAction.newline,
+            decoration: const InputDecoration(
+              labelText: 'Describe your problem',
+              hintText: 'Tell us what is going wrong',
+              alignLabelWithHint: true,
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text('Photos (optional, up to $_maxPhotos)', style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              OutlinedButton.icon(
+                onPressed: _pics.length >= _maxPhotos ? null : _fromGallery,
+                icon: const Icon(Icons.photo_library_outlined),
+                label: const Text('Gallery'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: _pics.length >= _maxPhotos ? null : _fromCamera,
+                icon: const Icon(Icons.photo_camera_outlined),
+                label: const Text('Camera'),
+              ),
+            ],
+          ),
+          if (_pics.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (var i = 0; i < _pics.length; i++)
+                  Stack(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: Image.memory(_pics[i].bytes, width: 90, height: 90, fit: BoxFit.cover),
+                      ),
+                      Positioned(
+                        right: 2,
+                        top: 2,
+                        child: InkWell(
+                          onTap: () => setState(() => _pics.removeAt(i)),
+                          child: const CircleAvatar(
+                            radius: 11,
+                            backgroundColor: Colors.black54,
+                            child: Icon(Icons.close, size: 14, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 20),
+          FilledButton.icon(
+            onPressed: _busy ? null : _send,
+            icon: _busy
+                ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.send_rounded),
+            label: Text(_busy ? 'Sending...' : 'Send'),
+          ),
+        ],
       ),
     );
   }
@@ -3945,7 +4520,10 @@ class _TicketPageState extends State<TicketPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Model: ${widget.ticket['subject'] ?? ''}'),
+                if (widget.ticket['kind'] == 'problem')
+                  const Text('Problem report', style: TextStyle(fontWeight: FontWeight.w700))
+                else
+                  Text('Model: ${widget.ticket['subject'] ?? ''}'),
                 if ((widget.ticket['size'] ?? '').toString().trim().isNotEmpty)
                   Text('Size: ${widget.ticket['size']}'),
                 if ((widget.ticket['serial_no'] ?? '').toString().trim().isNotEmpty)
@@ -3981,6 +4559,18 @@ class _TicketPageState extends State<TicketPage> {
                         if (fromAdmin && !widget.isAdmin)
                           const Text('Master', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                         Text(m['body'] as String),
+                        if (((m['images'] as List?) ?? const []).isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: [
+                                for (final ph in (m['images'] as List))
+                                  SupportPhoto(key: ValueKey(ph.toString()), path: ph.toString()),
+                              ],
+                            ),
+                          ),
                         if (fmtFull(m['created_at']).isNotEmpty)
                           Padding(
                             padding: const EdgeInsets.only(top: 4),
