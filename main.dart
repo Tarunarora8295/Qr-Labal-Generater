@@ -2860,7 +2860,9 @@ class _PromoAdminPageState extends State<PromoAdminPage> {
     if (isPercent && p['max_discount'] != null) {
       parts.add('max ${money(p['max_discount'] as num)}');
     }
-    parts.add(p['first_order_only'] == true ? 'first order only' : 'any order');
+    parts.add(p['first_order_only'] == true
+        ? 'first order only'
+        : (p['once_per_user'] == true ? 'once per customer' : 'unlimited use'));
     final uses = p['max_uses'];
     parts.add(uses == null ? 'used ${p['used_count']}' : 'used ${p['used_count']}/$uses');
     final exp = p['expires_at'];
@@ -2869,6 +2871,50 @@ class _PromoAdminPageState extends State<PromoAdminPage> {
       parts.add('expires ${d.day}/${d.month}/${d.year}');
     }
     return parts.join('  |  ');
+  }
+
+  Future<void> _editRules(Map<String, dynamic> p) async {
+    var first = p['first_order_only'] == true;
+    var once = p['once_per_user'] == true;
+    final save = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('${p['code']} - rules'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: first,
+                onChanged: (v) => setD(() => first = v),
+                title: const Text('First order only'),
+                subtitle: const Text('OFF = works on any order'),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: once,
+                onChanged: (v) => setD(() => once = v),
+                title: const Text('Once per customer'),
+                subtitle: const Text('OFF = unlimited use until you delete the code'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+    if (save != true) return;
+    try {
+      await db.from('promo_codes').update({'first_order_only': first, 'once_per_user': once}).eq('code', p['code']);
+      _reload();
+      if (mounted) toast(context, 'Rules saved');
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    }
   }
 
   Future<void> _setActive(Map<String, dynamic> p, bool on) async {
@@ -2908,7 +2954,8 @@ class _PromoAdminPageState extends State<PromoAdminPage> {
     final maxDisc = TextEditingController();
     final maxUses = TextEditingController();
     var percent = true;
-    var firstOnly = true;
+    var firstOnly = false;
+    var oncePerUser = false;
     DateTime? expiry;
     String? err;
 
@@ -2966,6 +3013,13 @@ class _PromoAdminPageState extends State<PromoAdminPage> {
                   value: firstOnly,
                   onChanged: (v) => setD(() => firstOnly = v),
                   title: const Text('First order only'),
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: oncePerUser,
+                  onChanged: (v) => setD(() => oncePerUser = v),
+                  title: const Text('Once per customer'),
+                  subtitle: const Text('OFF = same customer can use it again and again'),
                 ),
                 Row(
                   children: [
@@ -3033,6 +3087,7 @@ class _PromoAdminPageState extends State<PromoAdminPage> {
                   'discount_value': v,
                   'max_discount': percent && maxDisc.text.trim().isNotEmpty ? md : null,
                   'first_order_only': firstOnly,
+                  'once_per_user': oncePerUser,
                   'max_uses': maxUses.text.trim().isEmpty ? null : mu,
                   'expires_at': expiry == null
                       ? null
@@ -3094,6 +3149,7 @@ class _PromoAdminPageState extends State<PromoAdminPage> {
                 final on = p['active'] == true;
                 return Card(
                   child: ListTile(
+                    onTap: () => _editRules(p),
                     title: Text(
                       p['code'] as String,
                       style: TextStyle(
