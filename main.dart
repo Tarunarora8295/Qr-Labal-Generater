@@ -1090,6 +1090,12 @@ class AppDrawer extends StatelessWidget {
               nav.push(MaterialPageRoute(builder: (_) => const PromoAdminPage()));
             }),
           if (!isAdmin)
+            item(Icons.card_giftcard_outlined, 'Invite a friend', () {
+              final nav = Navigator.of(context);
+              nav.pop();
+              nav.push(MaterialPageRoute(builder: (_) => const InvitePage()));
+            }),
+          if (!isAdmin)
             item(Icons.description_outlined, 'Terms & Privacy', () {
               Navigator.of(context).pop();
               showDialog<void>(
@@ -1969,6 +1975,28 @@ class _BuyPageState extends State<BuyPage> {
   num get _total => widget.items.fold<num>(0, (a, t) => a + (t['price'] as num));
   num get _payable => _total - _discount;
 
+  Map<String, dynamic>? _reward;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadReward();
+  }
+
+  // an unused invite reward of this customer, offered at the top of the promo box
+  Future<void> _loadReward() async {
+    try {
+      final r = await db.rpc('my_invite_info');
+      final m = Map<String, dynamic>.from(r as Map);
+      for (final x in ((m['rewards'] as List?) ?? const [])) {
+        if (x['used'] != true && x['expired'] != true && x['active'] == true) {
+          if (mounted) setState(() => _reward = Map<String, dynamic>.from(x as Map));
+          break;
+        }
+      }
+    } catch (_) {}
+  }
+
   Future<void> _applyPromo() async {
     final code = _promo.text.trim();
     if (code.isEmpty) {
@@ -2105,6 +2133,29 @@ class _BuyPageState extends State<BuyPage> {
           ] else
             Text('Amount: ${money(_total)}', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
+          if (_appliedCode == null && _reward != null)
+            Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.card_giftcard, color: Colors.green.shade700, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('You have an invite reward: ${_reward!['code']}')),
+                  TextButton(
+                    onPressed: () {
+                      _promo.text = '${_reward!['code']}';
+                      _applyPromo();
+                    },
+                    child: const Text('Apply'),
+                  ),
+                ],
+              ),
+            ),
           if (_appliedCode == null)
             Row(
               children: [
@@ -2230,6 +2281,8 @@ Future<void> openFromPush(Map<String, dynamic> data) async {
       navKey.currentState?.push(
         MaterialPageRoute(builder: (_) => TicketPage(ticket: Map<String, dynamic>.from(t), isAdmin: appIsAdmin)),
       );
+    } else if (type == 'invite') {
+      navKey.currentState?.push(MaterialPageRoute(builder: (_) => const InvitePage()));
     } else if (type == 'orders') {
       shellTab.value = 1;
     } else if (type == 'store') {
@@ -2834,6 +2887,246 @@ class _PushAdminPageState extends State<PushAdminPage> {
   }
 }
 
+// ---------------------------------------------------------------- INVITE A FRIEND
+
+class InvitePage extends StatefulWidget {
+  const InvitePage({super.key});
+
+  @override
+  State<InvitePage> createState() => _InvitePageState();
+}
+
+class _InvitePageState extends State<InvitePage> {
+  final _claim = TextEditingController();
+  Map<String, dynamic>? _info;
+  bool _loading = true;
+  bool _claiming = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final r = await db.rpc('my_invite_info');
+      if (mounted) setState(() => _info = Map<String, dynamic>.from(r as Map));
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  String _shareText() =>
+      'Join Template Store! Install the app: https://github.com/$kRepo/releases/latest/download/app-release.apk\\n'
+      'After you log in, open the menu > Invite a friend and enter my invite code: ${_info!['code']}';
+
+  Future<void> _doClaim() async {
+    final code = _claim.text.trim();
+    if (code.isEmpty) {
+      toast(context, 'Enter your friend\'s invite code');
+      return;
+    }
+    setState(() => _claiming = true);
+    try {
+      await db.rpc('claim_invite', params: {'p_code': code});
+      _claim.clear();
+      if (mounted) toast(context, 'Invite code added. Thank you!');
+      await _load();
+    } on PostgrestException catch (e) {
+      if (mounted) toast(context, e.message);
+    } catch (e) {
+      if (mounted) toast(context, 'Error: $e');
+    } finally {
+      if (mounted) setState(() => _claiming = false);
+    }
+  }
+
+  String _rewardStatus(Map<String, dynamic> r) {
+    if (r['used'] == true) return 'Used';
+    if (r['expired'] == true || r['active'] != true) return 'Expired';
+    final d = fmtFull(r['expires_at']);
+    return d.isEmpty ? 'Available' : 'Available until ${d.split(',').first}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Invite a friend')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text('Error: $_error')))
+              : _body(),
+    );
+  }
+
+  Widget _body() {
+    final i = _info!;
+    final percent = i['percent'] ?? 50;
+    final cap = i['max_discount'] ?? 100;
+    final rewards = ((i['rewards'] as List?) ?? const []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.primaryContainer,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Invite a friend, get $percent% off',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 6),
+                Text(
+                  'When your friend joins with your code and their first payment is approved, '
+                  'you get a $percent% off coupon (up to ${money(cap as num)}).',
+                ),
+                const SizedBox(height: 14),
+                const Text('Your invite code', style: TextStyle(color: Colors.black54)),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${i['code']}',
+                        style: const TextStyle(fontSize: 30, fontWeight: FontWeight.w900, letterSpacing: 4),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Copy',
+                      icon: const Icon(Icons.copy),
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: '${i['code']}'));
+                        toast(context, 'Code copied');
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.icon(
+                      icon: const Icon(Icons.chat_outlined),
+                      label: const Text('Share on WhatsApp'),
+                      onPressed: () => launchUrl(
+                        Uri.parse('https://wa.me/?text=${Uri.encodeComponent(_shareText())}'),
+                        mode: LaunchMode.externalApplication,
+                      ),
+                    ),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.content_copy),
+                      label: const Text('Copy message'),
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: _shareText()));
+                        toast(context, 'Message copied');
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(child: _stat('${i['friends_joined'] ?? 0}', 'Friends joined')),
+              const SizedBox(width: 12),
+              Expanded(child: _stat('${i['friends_paid'] ?? 0}', 'Friends who paid')),
+            ],
+          ),
+          const SizedBox(height: 20),
+          const Text('My rewards', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          if (rewards.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: Text('No rewards yet. Share your code with a friend!'),
+            )
+          else
+            for (final r in rewards)
+              Card(
+                child: ListTile(
+                  leading: Icon(
+                    Icons.card_giftcard,
+                    color: _rewardStatus(r).startsWith('Available') ? Colors.green.shade700 : Colors.grey,
+                  ),
+                  title: Text('${r['code']}', style: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1)),
+                  subtitle: Text(_rewardStatus(r)),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.copy, size: 18),
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: '${r['code']}'));
+                      toast(context, 'Coupon copied. Use it in the promo box when you pay.');
+                    },
+                  ),
+                ),
+              ),
+          if (i['referred'] != true) ...[
+            const SizedBox(height: 20),
+            const Text('Did a friend invite you?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _claim,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: const InputDecoration(
+                      labelText: 'Friend\'s invite code',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: _claiming ? null : _doClaim,
+                  child: Text(_claiming ? '...' : 'Add'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Enter it before your first order so your friend gets their reward.',
+              style: TextStyle(fontSize: 12, color: Colors.black54),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _stat(String value, String label) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        children: [
+          Text(value, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+          Text(label, style: const TextStyle(color: Colors.black54)),
+        ],
+      ),
+    );
+  }
+}
+
 // ---------------------------------------------------------------- PROMO CODES (admin)
 
 class PromoAdminPage extends StatefulWidget {
@@ -2870,6 +3163,7 @@ class _PromoAdminPageState extends State<PromoAdminPage> {
       final d = DateTime.parse(exp as String).toLocal();
       parts.add('expires ${d.day}/${d.month}/${d.year}');
     }
+    if (p['owner_id'] != null) parts.add('invite reward');
     return parts.join('  |  ');
   }
 
@@ -3785,6 +4079,7 @@ class _OrdersPageState extends State<OrdersPage> {
               for (final r in g) {
                 final tt = r['templates'] as Map<String, dynamic>?;
                 if (tt != null) revenue += tt['price'] as num;
+                revenue -= (r['discount'] ?? 0) as num; // promo discount (saved on the main row)
               }
             }
             final items = (widget.isAdmin && _filter != 'all')
@@ -3818,7 +4113,7 @@ class _OrdersPageState extends State<OrdersPage> {
                             ),
                             const Spacer(),
                             Text(
-                              'Earned: ${money(revenue)}',
+                              'Net earned: ${money(revenue)}',
                               style: const TextStyle(
                                 color: Colors.green,
                                 fontWeight: FontWeight.w700,
@@ -4972,31 +5267,69 @@ class _ProfilePageState extends State<ProfilePage> {
 }
 
 
-// Admin: earnings from completed orders over the last 7 days (by order date)
+// Admin: earnings of the last 30 days from completed orders, AFTER removing the promo code discounts
+class _Earn {
+  final List<num> days; // net amount per day, oldest first
+  final num gross;
+  final num discount;
+  final int orders;
+  final int promoOrders;
+  _Earn(this.days, this.gross, this.discount, this.orders, this.promoOrders);
+}
+
 class EarningsChart extends StatelessWidget {
   const EarningsChart({super.key});
 
-  Future<List<num>> _load() async {
-    final r = asRows(
-      await db.from('orders').select('created_at, status, templates(price)').eq('status', 'approved'),
-    );
+  static const _n = 30;
+
+  Future<_Earn> _load() async {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-    final sums = List<num>.filled(7, 0);
+    final start = today.subtract(const Duration(days: _n - 1));
+    final r = asRows(
+      await db
+          .from('orders')
+          .select('id, created_at, status, discount, payment_group, templates(price)')
+          .eq('status', 'approved')
+          .gte('created_at', start.toUtc().toIso8601String()),
+    );
+    final days = List<num>.filled(_n, 0);
+    num gross = 0;
+    num discount = 0;
+    int promoOrders = 0;
+    final payments = <String>{};
     for (final o in r) {
       final d = DateTime.tryParse('${o['created_at']}')?.toLocal();
+      if (d == null) continue;
+      final diff = today.difference(DateTime(d.year, d.month, d.day)).inDays;
+      if (diff < 0 || diff >= _n) continue;
       final t = o['templates'] as Map<String, dynamic>?;
-      if (d == null || t == null) continue;
-      final day = DateTime(d.year, d.month, d.day);
-      final diff = today.difference(day).inDays;
-      if (diff >= 0 && diff < 7) sums[6 - diff] += t['price'] as num;
+      final price = t == null ? 0 : t['price'] as num;
+      final disc = (o['discount'] ?? 0) as num;
+      days[_n - 1 - diff] += price - disc;
+      gross += price;
+      discount += disc;
+      if (disc > 0) promoOrders++;
+      payments.add('${o['payment_group'] ?? o['id']}');
     }
-    return sums;
+    return _Earn(days, gross, discount, payments.length, promoOrders);
+  }
+
+  Widget _mini(String label, String value, Color color) {
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+          const SizedBox(height: 2),
+          Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: color)),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     return Container(
@@ -5008,18 +5341,17 @@ class EarningsChart extends StatelessWidget {
           BoxShadow(color: Colors.black.withAlpha(14), blurRadius: 16, offset: const Offset(0, 6)),
         ],
       ),
-      child: FutureBuilder<List<num>>(
+      child: FutureBuilder<_Earn>(
         future: _load(),
         builder: (c, s) {
-          if (s.hasError) return const Text('Could not load earnings');
+          if (s.hasError) return Text('Could not load earnings: ${s.error}');
           if (!s.hasData) {
             return const SizedBox(height: 120, child: Center(child: CircularProgressIndicator()));
           }
-          final v = s.data!;
-          num total = 0;
+          final e = s.data!;
+          final net = e.gross - e.discount;
           num maxV = 0;
-          for (final x in v) {
-            total += x;
+          for (final x in e.days) {
             if (x > maxV) maxV = x;
           }
           return Column(
@@ -5029,60 +5361,58 @@ class EarningsChart extends StatelessWidget {
                 children: [
                   const Expanded(
                     child: Text(
-                      'Earnings - last 7 days',
+                      'Earnings - last 30 days',
                       style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
                     ),
                   ),
                   Text(
-                    money(total),
-                    style: const TextStyle(
-                      color: Colors.green,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w800,
-                    ),
+                    money(net),
+                    style: const TextStyle(color: Colors.green, fontSize: 17, fontWeight: FontWeight.w800),
                   ),
                 ],
               ),
               const SizedBox(height: 4),
               Text(
-                'Completed orders, by order date',
+                'Completed orders, after removing promo code discounts',
                 style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  _mini('Sales', money(e.gross), Colors.black87),
+                  _mini('Promo discount', '-${money(e.discount)}', Colors.red.shade700),
+                  _mini('You earned', money(net), Colors.green.shade700),
+                  _mini('Orders', '${e.orders} (${e.promoOrders} promo)', Colors.black87),
+                ],
               ),
               const SizedBox(height: 16),
               SizedBox(
-                height: 130,
+                height: 120,
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    for (int i = 0; i < 7; i++)
+                    for (int i = 0; i < _n; i++)
                       Expanded(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.end,
                           children: [
-                            if (v[i] > 0)
-                              Text(
-                                money(v[i]),
-                                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
-                              ),
-                            const SizedBox(height: 3),
                             Container(
-                              height: maxV == 0 ? 4 : (v[i] / maxV * 80).clamp(4.0, 80.0).toDouble(),
-                              margin: const EdgeInsets.symmetric(horizontal: 6),
+                              height: maxV == 0 ? 3 : (e.days[i] / maxV * 84).clamp(3.0, 84.0).toDouble(),
+                              margin: const EdgeInsets.symmetric(horizontal: 1),
                               decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: v[i] > 0
-                                      ? const [kBrandB, kBrandA]
-                                      : [Colors.grey.shade300, Colors.grey.shade300],
-                                ),
-                                borderRadius: BorderRadius.circular(8),
+                                color: e.days[i] > 0 ? kBrandA : Colors.grey.shade300,
+                                borderRadius: BorderRadius.circular(3),
                               ),
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              names[today.subtract(Duration(days: 6 - i)).weekday - 1],
-                              style: TextStyle(fontSize: 10.5, color: Colors.grey.shade700),
+                            const SizedBox(height: 5),
+                            SizedBox(
+                              height: 12,
+                              child: (i % 5 == 0 || i == _n - 1)
+                                  ? Text(
+                                      '${today.subtract(Duration(days: _n - 1 - i)).day}',
+                                      style: TextStyle(fontSize: 9, color: Colors.grey.shade700),
+                                    )
+                                  : null,
                             ),
                           ],
                         ),
@@ -5090,6 +5420,14 @@ class EarningsChart extends StatelessWidget {
                   ],
                 ),
               ),
+              if (maxV > 0)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    'Best day: ${money(maxV)}',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                ),
             ],
           );
         },
