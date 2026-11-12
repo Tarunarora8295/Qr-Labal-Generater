@@ -898,9 +898,10 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   final ValueNotifier<int> _pending = ValueNotifier<int>(0);
   Timer? _timer;
+  Timer? _presenceTimer;
   int? _lastPending;
 
   @override
@@ -908,6 +909,10 @@ class _HomeShellState extends State<HomeShell> {
     super.initState();
     shellTab.value = 0;
     appIsAdmin = widget.isAdmin;
+    // tell the server this user opened the app (the admin sees Active now / Last seen)
+    WidgetsBinding.instance.addObserver(this);
+    _ping(online: true, opened: true);
+    _presenceTimer = Timer.periodic(const Duration(seconds: 45), (_) => _ping(online: true));
     WidgetsBinding.instance.addPostFrameCallback((_) => consumePendingPush());
     loadFavs();
     if (!kIsWeb) {
@@ -921,8 +926,29 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  Future<void> _ping({required bool online, bool opened = false}) async {
+    if (myId == null) return;
+    try {
+      await db.rpc('touch_presence', params: {'p_online': online, 'p_opened': opened});
+    } catch (_) {}
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _ping(online: true, opened: true);
+      _presenceTimer?.cancel();
+      _presenceTimer = Timer.periodic(const Duration(seconds: 45), (_) => _ping(online: true));
+    } else if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      _presenceTimer?.cancel();
+      _ping(online: false);
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _presenceTimer?.cancel();
     _timer?.cancel();
     _pending.dispose();
     super.dispose();
@@ -1127,6 +1153,7 @@ class AppDrawer extends StatelessWidget {
             () async {
               cart.clear();
               await unregisterPush();
+              await presenceOffline();
               await db.auth.signOut();
             },
             color: const Color(0xFFD92D20),
@@ -2302,7 +2329,7 @@ void consumePendingPush() {
 Future<void> initPush() async {
   if (kIsWeb) return;
   try {
-    await Firebase.initializeApp();
+    await Firebase.initializeApp().timeout(const Duration(seconds: 8));
     pushReady = true;
     FirebaseMessaging.instance.onTokenRefresh.listen((t) {
       pushToken = t;
@@ -2312,7 +2339,7 @@ Future<void> initPush() async {
     // tapped while the app was in the background
     FirebaseMessaging.onMessageOpenedApp.listen((m) => openFromPush(Map<String, dynamic>.from(m.data)));
     // tapped while the app was closed
-    final first = await FirebaseMessaging.instance.getInitialMessage();
+    final first = await FirebaseMessaging.instance.getInitialMessage().timeout(const Duration(seconds: 5));
     if (first != null) pendingPush = Map<String, dynamic>.from(first.data);
     FirebaseMessaging.onMessage.listen((m) {
       final n = m.notification;
@@ -2352,6 +2379,12 @@ Future<void> savePushToken() async {
   if (t == null || myId == null) return;
   try {
     await db.rpc('register_device', params: {'p_token': t});
+  } catch (_) {}
+}
+
+Future<void> presenceOffline() async {
+  try {
+    await db.rpc('touch_presence', params: {'p_online': false, 'p_opened': false});
   } catch (_) {}
 }
 
@@ -2402,6 +2435,7 @@ class _UsersAdminPageState extends State<UsersAdminPage> {
   Rows _users = [];
   bool _loading = true;
   String? _error;
+  String _activity = 'all'; // all | active | offline
 
   @override
   void initState() {
@@ -2476,11 +2510,18 @@ class _UsersAdminPageState extends State<UsersAdminPage> {
               _row('Phone', phone.isEmpty ? '-' : phone),
               _row('Joined', fmtFull(u['joined']).isEmpty ? '-' : fmtFull(u['joined'])),
               _row('Last login', fmtFull(u['last_login']).isEmpty ? '-' : fmtFull(u['last_login'])),
+              _row('App status', u['online'] == true ? 'Active now' : 'Offline'),
+              _row('Last opened app', fmtFull(u['last_open']).isEmpty ? 'Not yet' : fmtFull(u['last_open'])),
+              _row('Last seen', fmtFull(u['last_seen']).isEmpty ? '-' : fmtFull(u['last_seen'])),
               const Divider(height: 24),
               _row('Orders', '${u['orders_approved'] ?? 0} approved of ${u['orders_total'] ?? 0}'),
               _row('Total paid', money((u['spent'] ?? 0) as num)),
               _row('Last order', fmtFull(u['last_order']).isEmpty ? '-' : fmtFull(u['last_order'])),
               _row('Support tickets', '${u['tickets_total'] ?? 0} (${u['tickets_open'] ?? 0} open)'),
+              const Divider(height: 24),
+              const Text('Purchases', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15)),
+              const SizedBox(height: 4),
+              UserPurchases(userId: u['id']),
               const Divider(height: 24),
               _row('Notifications', u['has_device'] == true ? 'On' : 'Off'),
               _row('Telegram alerts', u['telegram'] == true ? 'Linked' : 'Not linked'),
@@ -2529,10 +2570,13 @@ class _UsersAdminPageState extends State<UsersAdminPage> {
   Widget build(BuildContext context) {
     final q = _search.text.trim().toLowerCase();
     final shown = _users.where((u) {
+      if (_activity == 'active' && u['online'] != true) return false;
+      if (_activity == 'offline' && u['online'] == true) return false;
       if (q.isEmpty) return true;
       return '${u['email'] ?? ''} ${u['name'] ?? ''} ${u['phone'] ?? ''}'.toLowerCase().contains(q);
     }).toList();
     final withPush = _users.where((u) => u['has_device'] == true).length;
+    final activeNow = _users.where((u) => u['online'] == true).length;
 
     return Scaffold(
       appBar: AppBar(
@@ -2559,11 +2603,34 @@ class _UsersAdminPageState extends State<UsersAdminPage> {
                       ),
                     ),
                     Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: Wrap(
+                        spacing: 8,
+                        children: [
+                          ChoiceChip(
+                            label: const Text('All'),
+                            selected: _activity == 'all',
+                            onSelected: (_) => setState(() => _activity = 'all'),
+                          ),
+                          ChoiceChip(
+                            label: Text('Active now ($activeNow)'),
+                            selected: _activity == 'active',
+                            onSelected: (_) => setState(() => _activity = 'active'),
+                          ),
+                          ChoiceChip(
+                            label: const Text('Offline'),
+                            selected: _activity == 'offline',
+                            onSelected: (_) => setState(() => _activity = 'offline'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: Text(
-                          '${_users.length} users  |  $withPush with notifications on',
+                          '${_users.length} users  |  $activeNow active now  |  $withPush notifications on',
                           style: const TextStyle(color: Colors.black54),
                         ),
                       ),
@@ -2583,16 +2650,35 @@ class _UsersAdminPageState extends State<UsersAdminPage> {
                                   return Card(
                                     child: ListTile(
                                       onTap: () => _open(u),
-                                      leading: CircleAvatar(
-                                        child: Text(title.isEmpty ? '?' : title[0].toUpperCase()),
+                                      leading: Stack(
+                                        clipBehavior: Clip.none,
+                                        children: [
+                                          CircleAvatar(
+                                            child: Text(title.isEmpty ? '?' : title[0].toUpperCase()),
+                                          ),
+                                          Positioned(
+                                            right: -1,
+                                            bottom: -1,
+                                            child: Container(
+                                              width: 13,
+                                              height: 13,
+                                              decoration: BoxDecoration(
+                                                color: u['online'] == true ? Colors.green : Colors.grey,
+                                                shape: BoxShape.circle,
+                                                border: Border.all(color: Colors.white, width: 2),
+                                              ),
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                       title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
                                       subtitle: Text(
                                         '${name.isEmpty ? '' : '${u['email'] ?? ''}\n'}'
                                         'Joined ${_shortDate(u['joined'])}  |  ${u['orders_approved'] ?? 0} orders  |  '
-                                        '${money((u['spent'] ?? 0) as num)}',
+                                        '${money((u['spent'] ?? 0) as num)}\n'
+                                        '${u['online'] == true ? 'Active now' : (fmtFull(u['last_seen']).isEmpty ? 'Has not opened the app yet' : 'Last seen ${fmtFull(u['last_seen'])}')}',
                                       ),
-                                      isThreeLine: name.isNotEmpty,
+                                      isThreeLine: true,
                                       trailing: Icon(
                                         u['has_device'] == true
                                             ? Icons.notifications_active
@@ -2925,7 +3011,7 @@ class _InvitePageState extends State<InvitePage> {
   }
 
   String _shareText() =>
-      'Join Template Store! Install the app: https://github.com/$kRepo/releases/latest/download/app-release.apk\\n'
+      'Join Template Store! Install the app: https://github.com/$kRepo/releases/latest/download/app-release.apk\n'
       'After you log in, open the menu > Invite a friend and enter my invite code: ${_info!['code']}';
 
   Future<void> _doClaim() async {
@@ -3618,6 +3704,7 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
     final x = await ImagePicker().pickImage(source: ImageSource.gallery);
     if (x == null) return;
     final b = await x.readAsBytes();
+    if (!mounted) return;
     setState(() {
       _file = x;
       _bytes = b;
@@ -3846,6 +3933,303 @@ class _AddTemplatePageState extends State<AddTemplatePage> {
 
 // ---------------------------------------------------------------- ORDERS
 
+class OrderDetailsPage extends StatefulWidget {
+  final Rows rows;
+  final bool isAdmin;
+  final Future<void> Function()? onApprove;
+  final Future<void> Function()? onReject;
+  const OrderDetailsPage({
+    super.key,
+    required this.rows,
+    required this.isAdmin,
+    this.onApprove,
+    this.onReject,
+  });
+
+  @override
+  State<OrderDetailsPage> createState() => _OrderDetailsPageState();
+}
+
+class _OrderDetailsPageState extends State<OrderDetailsPage> {
+  bool _busy = false;
+
+  Future<void> _run(Future<void> Function() f) async {
+    setState(() => _busy = true);
+    try {
+      await f();
+      if (mounted) Navigator.pop(context);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _kv(String k, String v) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 110, child: Text(k, style: const TextStyle(color: Colors.black54))),
+          Expanded(child: Text(v, style: const TextStyle(fontWeight: FontWeight.w600))),
+        ],
+      ),
+    );
+  }
+
+  void _zoomPreview(String path) {
+    final url = db.storage.from('previews').getPublicUrl(path);
+    showDialog(
+      context: context,
+      builder: (_) => Dialog(insetPadding: const EdgeInsets.all(8), child: InteractiveViewer(child: Image.network(url))),
+    );
+  }
+
+  // admin: look at the real (original) file before approving
+  Future<void> _viewOriginal(String path, String title) async {
+    if (path.toLowerCase().endsWith('.pdf')) {
+      await openOriginal(context, path, saveName: title);
+      return;
+    }
+    try {
+      final url = await db.storage.from('originals').createSignedUrl(path, 600);
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        builder: (_) => Dialog(insetPadding: const EdgeInsets.all(8), child: InteractiveViewer(child: Image.network(url))),
+      );
+    } catch (e) {
+      if (mounted) toast(context, 'Could not open the file: $e');
+    }
+  }
+
+  Widget _item(Map<String, dynamic> r, String status) {
+    final t = r['templates'] as Map<String, dynamic>?;
+    if (t == null) {
+      return const Card(child: ListTile(title: Text('This template was deleted')));
+    }
+    final prev = (t['preview_path'] ?? '').toString();
+    final filePath = '${t['file_path'] ?? ''}';
+    final isPdf = filePath.toLowerCase().endsWith('.pdf');
+    final cat = (t['category'] ?? '').toString();
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (prev.isNotEmpty)
+            GestureDetector(
+              onTap: () => _zoomPreview(prev),
+              child: AspectRatio(
+                aspectRatio: 4 / 3,
+                child: Container(color: Colors.grey.shade100, child: PreviewImage(path: prev, fit: BoxFit.contain)),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('${t['title']}', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    Chip(label: Text(isPdf ? 'PDF' : 'Image'), visualDensity: VisualDensity.compact),
+                    if (cat.isNotEmpty) Chip(label: Text(cat), visualDensity: VisualDensity.compact),
+                    Chip(label: Text(money(t['price'] as num)), visualDensity: VisualDensity.compact),
+                  ],
+                ),
+                Wrap(
+                  children: [
+                    if (prev.isNotEmpty)
+                      TextButton.icon(
+                        onPressed: () => _zoomPreview(prev),
+                        icon: const Icon(Icons.zoom_in),
+                        label: const Text('View preview'),
+                      ),
+                    if (widget.isAdmin)
+                      TextButton.icon(
+                        onPressed: () => _viewOriginal(filePath, '${t['title']}'),
+                        icon: const Icon(Icons.image_search),
+                        label: Text(isPdf ? 'Download original' : 'View original'),
+                      )
+                    else if (status == 'approved')
+                      TextButton.icon(
+                        onPressed: () => openOriginal(context, filePath, saveName: '${t['title']}'),
+                        icon: const Icon(Icons.download),
+                        label: const Text('Download'),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final o = widget.rows.first;
+    final status = '${o['status']}';
+    num total = 0;
+    num disc = 0;
+    for (final r in widget.rows) {
+      final t = r['templates'] as Map<String, dynamic>?;
+      if (t != null) total += t['price'] as num;
+      disc += (r['discount'] ?? 0) as num;
+    }
+    final promo = widget.rows
+        .map((r) => (r['promo_code'] ?? '').toString())
+        .firstWhere((c) => c.isNotEmpty, orElse: () => '');
+    final remarks = (o['remarks'] ?? '').toString().trim();
+    final canAct = widget.onApprove != null || widget.onReject != null;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Order details')),
+      bottomNavigationBar: !canAct
+          ? null
+          : SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    if (widget.onReject != null)
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: _busy ? null : () => _run(widget.onReject!),
+                          child: const Text('Reject'),
+                        ),
+                      ),
+                    if (widget.onReject != null && widget.onApprove != null) const SizedBox(width: 12),
+                    if (widget.onApprove != null)
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: _busy ? null : () => _run(widget.onApprove!),
+                          child: const Text('Approve'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+      body: ListView(
+        padding: const EdgeInsets.all(14),
+        children: [
+          Row(
+            children: [
+              statusChip(status),
+              const SizedBox(width: 10),
+              Expanded(child: Text(fmtFull(o['created_at']), style: const TextStyle(color: Colors.black54))),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (widget.isAdmin) ...[
+                    _kv('Customer', ('${o['customer_name'] ?? ''}').trim().isEmpty ? '-' : '${o['customer_name']}'),
+                    _kv('Phone', ('${o['customer_phone'] ?? ''}').trim().isEmpty ? '-' : '${o['customer_phone']}'),
+                    _kv('Email', '${o['user_email'] ?? '-'}'),
+                  ],
+                  _kv('UTR', '${o['utr'] ?? '-'}'),
+                  _kv('Total', money(total)),
+                  if (disc > 0) _kv('Promo ${promo.isEmpty ? '' : promo}', '-${money(disc)}'),
+                  _kv(status == 'approved' ? 'Paid' : 'To pay', money(total - disc)),
+                  if (status == 'rejected' && remarks.isNotEmpty) _kv('Reason', remarks),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            widget.rows.length > 1 ? 'Purchased templates (${widget.rows.length})' : 'Purchased template',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 6),
+          for (final r in widget.rows) _item(r, status),
+        ],
+      ),
+    );
+  }
+}
+
+class UserPurchases extends StatefulWidget {
+  final dynamic userId;
+  const UserPurchases({super.key, required this.userId});
+
+  @override
+  State<UserPurchases> createState() => _UserPurchasesState();
+}
+
+class _UserPurchasesState extends State<UserPurchases> {
+  late final Future<Rows> _f = _load();
+
+  Future<Rows> _load() async {
+    final r = await db
+        .from('orders')
+        .select('*, templates(title, price, file_path, preview_path, category)')
+        .eq('user_id', widget.userId)
+        .order('created_at', ascending: false)
+        .limit(40);
+    return asRows(r);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<Rows>(
+      future: _f,
+      builder: (c, s) {
+        if (s.hasError) return Text('Could not load purchases: ${s.error}');
+        if (!s.hasData) {
+          return const Padding(padding: EdgeInsets.all(12), child: Center(child: CircularProgressIndicator()));
+        }
+        final groups = <String, Rows>{};
+        for (final r in s.data!) {
+          groups.putIfAbsent('${r['payment_group'] ?? r['id']}', () => []).add(r);
+        }
+        if (groups.isEmpty) {
+          return const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: Text('No orders yet'));
+        }
+        return Column(
+          children: [
+            for (final g in groups.values)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => OrderDetailsPage(rows: g, isAdmin: true)),
+                ),
+                leading: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: ((g.first['templates'] as Map<String, dynamic>?)?['preview_path'] ?? '').toString().isEmpty
+                        ? const Icon(Icons.image_not_supported_outlined)
+                        : PreviewImage(path: (g.first['templates'] as Map<String, dynamic>)['preview_path'] as String),
+                  ),
+                ),
+                title: Text(
+                  g.map((r) => '${(r['templates'] as Map<String, dynamic>?)?['title'] ?? 'Deleted template'}').join(', '),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(fmtFull(g.first['created_at'])),
+                trailing: statusChip('${g.first['status']}'),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class OrdersPage extends StatefulWidget {
   final bool isAdmin;
   const OrdersPage({super.key, required this.isAdmin});
@@ -3858,10 +4242,26 @@ class _OrdersPageState extends State<OrdersPage> {
   late Future<Rows> _f = _load();
   String _filter = 'all'; // all | pending | approved | rejected
 
+  void _openDetails(Rows g) {
+    final o = g.first;
+    final pending = widget.isAdmin && o['status'] == 'pending';
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OrderDetailsPage(
+          rows: g,
+          isAdmin: widget.isAdmin,
+          onApprove: pending ? () => _setStatus(o, 'approved') : null,
+          onReject: pending ? () => _reject(o) : null,
+        ),
+      ),
+    );
+  }
+
   Future<Rows> _load() async {
     final r = await db
         .from('orders')
-        .select('*, templates(title, price, file_path)')
+        .select('*, templates(title, price, file_path, preview_path, category)')
         .order('created_at', ascending: false);
     return asRows(r);
   }
@@ -4225,6 +4625,30 @@ class _OrdersPageState extends State<OrdersPage> {
                         ],
                         if (_when(o['created_at']).isNotEmpty)
                           _infoRow(Icons.schedule_rounded, _when(o['created_at'])),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: [
+                              for (final r in g)
+                                if (((r['templates'] as Map<String, dynamic>?)?['preview_path'] ?? '').toString().isNotEmpty)
+                                  GestureDetector(
+                                    onTap: () => _openDetails(g),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: SizedBox(
+                                        width: 56,
+                                        height: 56,
+                                        child: PreviewImage(
+                                          path: (r['templates'] as Map<String, dynamic>)['preview_path'] as String,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                            ],
+                          ),
+                        ),
                         Text('UTR: ${o['utr'] ?? ''}'),
                         Builder(builder: (_) {
                           final pr = g.where((r) => (r['promo_code'] ?? '').toString().isNotEmpty).toList();
@@ -4255,6 +4679,15 @@ class _OrdersPageState extends State<OrdersPage> {
                             ),
                           ),
                         const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            style: TextButton.styleFrom(padding: EdgeInsets.zero, visualDensity: VisualDensity.compact),
+                            onPressed: () => _openDetails(g),
+                            icon: const Icon(Icons.visibility_outlined, size: 18),
+                            label: const Text('View details'),
+                          ),
+                        ),
                         if (widget.isAdmin && status == 'pending')
                           Row(
                             mainAxisAlignment: MainAxisAlignment.end,
@@ -5255,6 +5688,7 @@ class _ProfilePageState extends State<ProfilePage> {
             onPressed: () async {
               cart.clear();
               await unregisterPush();
+              await presenceOffline();
               await db.auth.signOut();
             },
             icon: const Icon(Icons.logout_rounded),
