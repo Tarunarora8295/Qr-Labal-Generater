@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - uses: subosito/flutter-action@v2
         with:
@@ -154,6 +154,33 @@ jobs:
           </resources>
           XML
           sed -i 's#</application>#    <meta-data android:name="com.google.firebase.messaging.default_notification_icon" android:resource="@drawable/ic_stat_notify"/>\n        <meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@color/notify_color"/>\n        <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="chat"/>\n    </application>#' android/app/src/main/AndroidManifest.xml
+
+      # The Android "lint" check crashes inside the Firebase plugin (a bug of the lint tool) and is not needed to build the APK
+      - name: Turn off Android lint checks
+        run: |
+          if [ -f android/build.gradle.kts ]; then
+            cat >> android/build.gradle.kts <<'EOF'
+
+          subprojects {
+              tasks.configureEach {
+                  if (name.startsWith("lintVital") || name.startsWith("lintAnalyze") || name.startsWith("lintReport")) {
+                      enabled = false
+                  }
+              }
+          }
+          EOF
+          elif [ -f android/build.gradle ]; then
+            cat >> android/build.gradle <<'EOF'
+
+          subprojects {
+              tasks.configureEach { t ->
+                  if (t.name.startsWith("lintVital") || t.name.startsWith("lintAnalyze") || t.name.startsWith("lintReport")) {
+                      t.enabled = false
+                  }
+              }
+          }
+          EOF
+          fi
 
       - name: Build APK
         run: flutter build apk --release --build-number=${{ github.run_number }}
