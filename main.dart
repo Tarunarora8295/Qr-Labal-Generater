@@ -3045,7 +3045,10 @@ class _InvitePageState extends State<InvitePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Invite a friend')),
+      appBar: AppBar(
+        title: const Text('Invite a friend'),
+        actions: [IconButton(tooltip: 'Refresh', onPressed: _load, icon: const Icon(Icons.refresh))],
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
@@ -3133,6 +3136,11 @@ class _InvitePageState extends State<InvitePage> {
               const SizedBox(width: 12),
               Expanded(child: _stat('${i['friends_paid'] ?? 0}', 'Friends who paid')),
             ],
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            '"Friends joined" goes up when your friend enters your code in this app (menu > Invite a friend > "Did a friend invite you?"). Only sharing the message does not count. Pull down to refresh.',
+            style: TextStyle(fontSize: 12, color: Colors.black54),
           ),
           const SizedBox(height: 20),
           const Text('My rewards', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
